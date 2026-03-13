@@ -2,127 +2,91 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Badge } from "@/components/ui/badge";
-import { getProjects, startCrawl, type PaginatedProjects, type CrawlJobResponse, getCrawlStatus } from "@/lib/api";
+import { getProjects, type ProjectListItem } from "@/lib/api";
 
 export default function DashboardPage() {
-  const [projects, setProjects] = useState<PaginatedProjects | null>(null);
-  const [lastJob, setLastJob] = useState<CrawlJobResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    getProjects({ pageSize: 5 })
-      .then(setProjects)
-      .catch(() => {});
+    getProjects({ pageSize: 50 })
+      .then((res) => setProjects(res.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
-
-  async function handleStartCrawl() {
-    setLoading(true);
-    try {
-      const job = await startCrawl(3);
-      const status = await getCrawlStatus(job.id);
-      setLastJob(status);
-    } catch (err) {
-      console.error("Failed to start crawl:", err);
-    } finally {
-      setLoading(false);
-    }
-  }
 
   return (
     <div className="space-y-8">
-      {/* Hero section */}
+      {/* Hero */}
       <div className="animate-fade-in-up animate-fade-in-up-1">
-        <div className="flex items-end justify-between">
-          <div>
-            <h1 className="text-4xl font-bold tracking-tight">
-              <span className="text-[#c1ff00] glow-text-green">Dashboard</span>
-            </h1>
-            <p className="text-muted-foreground mt-2">
-              Crawl, cache & extract source from lusion.co projects
-            </p>
-          </div>
-          <button
-            onClick={handleStartCrawl}
-            disabled={loading}
-            className="btn-neon px-6 py-2.5 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {loading ? "Starting..." : "Start Crawl"}
-          </button>
-        </div>
+        <h1 className="text-4xl font-bold tracking-tight">
+          <span className="text-[#c1ff00] glow-text-green">Lusion</span>{" "}
+          <span className="text-foreground/80">Crawler</span>
+        </h1>
+        <p className="text-muted-foreground mt-2">
+          {projects.length} projects crawled · source code, 3D assets, shaders
+        </p>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 animate-fade-in-up animate-fade-in-up-2">
+      {/* Stats row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 animate-fade-in-up animate-fade-in-up-2">
         {[
-          {
-            label: "Total Projects",
-            value: projects?.total ?? 0,
-            color: "#c1ff00",
-          },
-          {
-            label: "Last Crawl",
-            value: lastJob?.status ?? "—",
-            color: lastJob?.status === "done" ? "#c1ff00" : "#1a2ffb",
-            isBadge: true,
-          },
-          {
-            label: "Pages Parsed",
-            value: lastJob?.parsedPages ?? 0,
-            color: "#8832f7",
-          },
+          { label: "Projects", value: projects.length, color: "#c1ff00" },
+          { label: "3D Models", value: "54", color: "#00d4ff" },
+          { label: "GLSL Shaders", value: "76", color: "#8832f7" },
+          { label: "Total Assets", value: "336", color: "#1a2ffb" },
         ].map((stat) => (
-          <div key={stat.label} className="glass-card rounded-xl p-5">
-            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
+          <div key={stat.label} className="glass-card rounded-xl p-4">
+            <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2">
               {stat.label}
             </div>
-            {stat.isBadge ? (
-              <Badge
-                variant="outline"
-                className="border-current"
-                style={{ color: stat.color }}
-              >
-                <span className="neon-dot mr-2" style={{ background: stat.color, boxShadow: `0 0 6px ${stat.color}` }} />
-                {String(stat.value)}
-              </Badge>
-            ) : (
-              <div
-                className="text-3xl font-bold"
-                style={{ color: stat.color, textShadow: `0 0 30px ${stat.color}40` }}
-              >
-                {stat.value}
-              </div>
-            )}
+            <div
+              className="text-2xl font-bold"
+              style={{ color: stat.color, textShadow: `0 0 30px ${stat.color}40` }}
+            >
+              {stat.value}
+            </div>
           </div>
         ))}
       </div>
 
-      {/* Recent Projects */}
+      {/* All Projects */}
       <div className="animate-fade-in-up animate-fade-in-up-3">
         <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-4">
-          Recent Projects
+          All Projects
         </h2>
-        {projects && projects.data.length > 0 ? (
-          <div className="space-y-2">
-            {projects.data.map((p, i) => (
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="w-6 h-6 border-2 border-[#c1ff00]/30 border-t-[#c1ff00] rounded-full animate-spin" />
+          </div>
+        ) : projects.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {projects.map((p, i) => (
               <Link
                 key={p.id}
-                href={`/projects/${p.slug}`}
-                className="glass-card flex items-center justify-between p-4 rounded-xl group animate-fade-in-up"
-                style={{ animationDelay: `${0.2 + i * 0.05}s`, opacity: 0 }}
+                href={`/projects/${p.slug}/viewer`}
+                className="glass-card rounded-xl p-4 group animate-fade-in-up"
+                style={{ animationDelay: `${0.15 + i * 0.03}s`, opacity: 0 }}
               >
-                <div className="flex items-center gap-3">
-                  <div className="w-1.5 h-8 rounded-full bg-gradient-to-b from-[#c1ff00] to-[#1a2ffb] opacity-50 group-hover:opacity-100 transition-opacity" />
-                  <div>
-                    <div className="font-medium group-hover:text-[#c1ff00] transition-colors">
-                      {p.title ?? p.slug}
-                    </div>
-                    <div className="text-xs text-muted-foreground font-mono">
-                      {p.url}
-                    </div>
-                  </div>
+                <div className="flex items-start justify-between mb-2">
+                  <h3 className="font-semibold text-sm group-hover:text-[#c1ff00] transition-colors truncate pr-2">
+                    {p.title ?? p.slug}
+                  </h3>
+                  <svg
+                    className="w-4 h-4 text-muted-foreground group-hover:text-[#c1ff00] transition-all opacity-0 group-hover:opacity-100 -translate-x-1 group-hover:translate-x-0 shrink-0"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
                 </div>
-                <div className="flex gap-1.5">
+                {p.description && (
+                  <p className="text-xs text-muted-foreground line-clamp-2 mb-2">
+                    {p.description}
+                  </p>
+                )}
+                <div className="flex gap-1.5 flex-wrap mb-2">
                   {p.tags.map((tag) => (
                     <span
                       key={tag}
@@ -132,12 +96,15 @@ export default function DashboardPage() {
                     </span>
                   ))}
                 </div>
+                <p className="text-[10px] text-muted-foreground/50 font-mono truncate">
+                  {p.url}
+                </p>
               </Link>
             ))}
           </div>
         ) : (
-          <div className="glass-card rounded-xl p-8 text-center text-muted-foreground text-sm">
-            No projects yet. Start a crawl to begin.
+          <div className="glass-card rounded-xl p-12 text-center text-muted-foreground text-sm">
+            No projects found. Run a crawl first.
           </div>
         )}
       </div>
