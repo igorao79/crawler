@@ -141,6 +141,7 @@ export function getProject(slug: string): Promise<ProjectDetail> {
 
 export interface SourceFile {
   name: string;
+  displayName: string;
   sizeBytes: number;
 }
 

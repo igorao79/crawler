@@ -40,21 +40,6 @@ export default function RootLayout({
                 CRAWLER
               </span>
             </Link>
-            <div className="flex items-center gap-1 text-sm">
-              {[
-                { href: "/", label: "Dashboard" },
-                { href: "/crawl", label: "Crawl" },
-                { href: "/projects", label: "Projects" },
-              ].map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className="px-3 py-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/[0.04] transition-all duration-200"
-                >
-                  {item.label}
-                </Link>
-              ))}
-            </div>
           </nav>
         </header>
         <main className="container mx-auto px-6 py-8">

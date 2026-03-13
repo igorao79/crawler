@@ -3,9 +3,9 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowLeft, ExternalLink, Download } from "lucide-react";
 import { ViewerLayout } from "@/components/viewer/viewer-layout";
-import { getProject, type ProjectDetail } from "@/lib/api";
+import { getProject, PROXY_URL, type ProjectDetail } from "@/lib/api";
 
 export default function ViewerPage() {
   const params = useParams();
@@ -34,7 +34,7 @@ export default function ViewerPage() {
       {/* Header */}
       <div className="flex items-center gap-4 px-4 py-2 border-b border-white/[0.08] bg-background/80 backdrop-blur-md shrink-0">
         <Link
-          href={`/projects/${slug}`}
+          href="/projects"
           className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-[#c1ff00] transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -44,17 +44,26 @@ export default function ViewerPage() {
         <h1 className="text-sm font-semibold truncate">
           {project?.title ?? slug}
         </h1>
-        {project?.url && (
+        <div className="ml-auto flex items-center gap-3">
           <a
-            href={project.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-[#c1ff00] transition-colors"
+            href={`${PROXY_URL}/api/source/download-all`}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md bg-[#c1ff00] text-black font-medium hover:bg-[#d4ff4d] transition-colors"
           >
-            <ExternalLink className="h-3 w-3" />
-            Original
+            <Download className="h-3 w-3" />
+            Download Site
           </a>
-        )}
+          {project?.url && (
+            <a
+              href={project.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-[#c1ff00] transition-colors"
+            >
+              <ExternalLink className="h-3 w-3" />
+              Original
+            </a>
+          )}
+        </div>
       </div>
 
       {/* Viewer */}

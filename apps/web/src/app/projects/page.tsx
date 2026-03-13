@@ -56,27 +56,6 @@ export default function ProjectsPage() {
             className="w-64 h-9 px-4 rounded-lg text-sm bg-white/[0.04] border border-white/[0.08] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-[#c1ff00]/30 focus:shadow-[0_0_15px_rgba(193,255,0,0.1)] transition-all"
           />
         </div>
-        <div className="flex gap-1.5 flex-wrap">
-          {activeTag && (
-            <button
-              onClick={() => { setActiveTag(null); setPage(1); }}
-              className="text-xs px-3 py-1 rounded-full bg-[#c1ff00]/15 text-[#c1ff00] border border-[#c1ff00]/30 hover:bg-[#c1ff00]/25 transition-all"
-            >
-              {activeTag} ✕
-            </button>
-          )}
-          {allTags
-            .filter((t) => t !== activeTag)
-            .map((tag) => (
-              <button
-                key={tag}
-                onClick={() => { setActiveTag(tag); setPage(1); }}
-                className="text-xs px-3 py-1 rounded-full border border-white/10 text-muted-foreground hover:border-white/20 hover:text-foreground transition-all"
-              >
-                {tag}
-              </button>
-            ))}
-        </div>
       </div>
 
       {/* Project Grid */}
@@ -91,7 +70,7 @@ export default function ProjectsPage() {
           {projects.map((project, i) => (
             <Link
               key={project.id}
-              href={`/projects/${project.slug}`}
+              href={`/projects/${project.slug}/viewer`}
               className="glass-card rounded-xl p-5 group animate-fade-in-up"
               style={{ animationDelay: `${0.1 + i * 0.03}s`, opacity: 0 }}
             >
@@ -108,16 +87,6 @@ export default function ProjectsPage() {
                   {project.description}
                 </p>
               )}
-              <div className="flex gap-1.5 flex-wrap mb-3">
-                {project.tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="text-[10px] px-2 py-0.5 rounded-full border border-white/10 text-muted-foreground"
-                  >
-                    {tag}
-                  </span>
-                ))}
-              </div>
               <p className="text-[11px] text-muted-foreground/60 font-mono truncate">
                 {project.url}
               </p>

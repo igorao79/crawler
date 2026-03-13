@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { eq, like, sql } from 'drizzle-orm';
-import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, statSync, readFileSync, createReadStream } from 'fs';
 import { join, resolve } from 'path';
+import archiver from 'archiver';
 import * as schema from '../db/schema.js';
 import type { DrizzleDB } from '../db/client.js';
 
@@ -125,7 +126,7 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
           .filter((f) => !f.endsWith('.meta.json'))
           .map((f) => {
             const stat = statSync(join(dir, f));
-            return { name: f, sizeBytes: stat.size };
+            return { name: f, displayName: friendlyFileName(f, cat), sizeBytes: stat.size };
           })
           .sort((a, b) => b.sizeBytes - a.sizeBytes);
         return { name: cat, files };
@@ -203,6 +204,130 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
     const total = categories.reduce((sum, c) => sum + c.items.length, 0);
     return reply.send({ categories, total });
   });
+
+  // GET /api/source/download-all — ZIP of full site with original structure + deobfuscated JS/CSS
+  fastify.get('/api/source/download-all', async (_request, reply) => {
+    const PROXY_CACHE_DIR = './proxy-cache';
+
+    if (!existsSync(PROXY_CACHE_DIR)) {
+      return reply.status(404).send({ error: 'No cached site found. Run crawl first.' });
+    }
+
+    reply.raw.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="lusion-site.zip"',
+      'Transfer-Encoding': 'chunked',
+    });
+
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    archive.pipe(reply.raw);
+
+    // Map of proxy-cache relative paths → deobfuscated readable-source paths
+    // Only CSS — JS deobfuscation breaks syntax (Prettier can't handle 1.7MB minified bundle)
+    const deobfuscatedMap: Record<string, string> = {};
+    if (existsSync(join(READABLE_SOURCE_DIR, 'css'))) {
+      for (const f of readdirSync(join(READABLE_SOURCE_DIR, 'css'))) {
+        if (f === 'design-tokens.css' || f === 'animations.css') continue;
+        const originalPath = f.replace(/^_astro_/, '_astro/');
+        deobfuscatedMap[originalPath] = join(READABLE_SOURCE_DIR, 'css', f);
+      }
+    }
+
+    // Walk entire proxy-cache with original structure
+    const walkAndAdd = (dir: string, zipPrefix: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = join(dir, entry.name);
+        const zipPath = zipPrefix ? `${zipPrefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          walkAndAdd(fullPath, zipPath);
+        } else if (!entry.name.endsWith('.meta.json')) {
+          // Check if we have a deobfuscated version
+          const deobPath = deobfuscatedMap[zipPath];
+          if (deobPath && existsSync(deobPath)) {
+            archive.file(deobPath, { name: `lusion-site/${zipPath}` });
+          } else {
+            archive.file(fullPath, { name: `lusion-site/${zipPath}` });
+          }
+        }
+      }
+    };
+
+    walkAndAdd(PROXY_CACHE_DIR, '');
+
+    // Also add extra deobfuscated files that don't replace originals
+    const extras = [
+      { src: join(READABLE_SOURCE_DIR, 'css', 'design-tokens.css'), dest: 'lusion-site/_extras/design-tokens.css' },
+      { src: join(READABLE_SOURCE_DIR, 'css', 'animations.css'), dest: 'lusion-site/_extras/animations.css' },
+      { src: join(READABLE_SOURCE_DIR, 'shaders', 'extracted-shaders.glsl'), dest: 'lusion-site/_extras/extracted-shaders.glsl' },
+      { src: join(READABLE_SOURCE_DIR, 'assets-index', 'ASSETS.md'), dest: 'lusion-site/_extras/ASSETS.md' },
+    ];
+    for (const { src, dest } of extras) {
+      if (existsSync(src)) archive.file(src, { name: dest });
+    }
+
+    // Add a README with instructions
+    archive.append(
+      `# Lusion.co — Parsed Site\n\n` +
+      `## How to run locally\n\n` +
+      `1. Extract this ZIP\n` +
+      `2. Open terminal in the extracted folder\n` +
+      `3. Run: npx serve .\n` +
+      `4. Open http://localhost:3000 in your browser\n\n` +
+      `## What's inside\n\n` +
+      `- Full site with original file structure (HTML, CSS, JS, assets)\n` +
+      `- JS and CSS are deobfuscated (formatted, readable)\n` +
+      `- _extras/ folder contains extracted GLSL shaders, design tokens, animations, and asset catalog\n\n` +
+      `## Notes\n\n` +
+      `- The JS code is production build — variable names are minified but logic is intact\n` +
+      `- GLSL shaders in _extras/ are the most readable part — almost original source\n` +
+      `- Some external resources (CDN videos) may not load offline\n`,
+      { name: 'lusion-site/README.md' }
+    );
+
+    await archive.finalize();
+    return reply;
+  });
+}
+
+/** Maps ugly build-hashed filenames to human-readable display names */
+function friendlyFileName(raw: string, category: string): string {
+  // HTML pages — turn "projects_devin_ai_index.html" → "devin-ai.html"
+  if (category === 'html') {
+    if (raw === 'index.html') return 'index.html';
+    if (raw === 'about_index.html') return 'about.html';
+    if (raw === 'projects_index.html') return 'projects.html';
+    // projects_devin_ai_index.html → devin-ai.html
+    const m = raw.match(/^projects_(.+?)_index\.html$/);
+    if (m) {
+      return m[1].replace(/_/g, '-') + '.html';
+    }
+  }
+
+  // JS — strip astro hashes
+  if (category === 'js') {
+    if (raw.match(/astro_hoisted/i)) return 'main-bundle.js';
+    if (raw.match(/team/i)) return 'team-data.json';
+    if (raw.match(/webmanifest/i)) return 'site.webmanifest';
+  }
+
+  // CSS — strip astro hashes
+  if (category === 'css') {
+    if (raw.match(/astro_about/i)) return 'styles.css';
+    if (raw === 'design-tokens.css') return 'design-tokens.css';
+    if (raw === 'animations.css') return 'animations.css';
+  }
+
+  // Shaders
+  if (category === 'shaders') {
+    if (raw === 'extracted-shaders.glsl') return 'all-shaders.glsl';
+  }
+
+  // Assets index
+  if (category === 'assets-index') {
+    if (raw === 'ASSETS.md') return 'Asset Catalog';
+  }
+
+  return raw;
 }
 
 function parseJsonArray(value: string | null): string[] {

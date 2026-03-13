@@ -14,7 +14,7 @@ export function PreviewPanel({ slug, proxyUrl }: PreviewPanelProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
-  const src = `${proxyUrl}/projects/${slug}`;
+  const src = slug ? `${proxyUrl}/projects/${slug}` : proxyUrl;
 
   const handleRefresh = () => {
     setLoading(true);
@@ -66,12 +66,6 @@ export function PreviewPanel({ slug, proxyUrl }: PreviewPanelProps) {
 
       {/* Iframe */}
       <div className="flex-1 relative bg-black">
-        {loading && !error && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center z-10 gap-3">
-            <div className="w-8 h-8 border-2 border-[#c1ff00]/30 border-t-[#c1ff00] rounded-full animate-spin" />
-            <span className="text-muted-foreground text-sm">Loading 3D preview...</span>
-          </div>
-        )}
         {error && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground text-sm z-10 gap-2">
             <p>Failed to load preview</p>

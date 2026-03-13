@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { FileCode, FileText, Paintbrush, Sparkles, FolderOpen, ChevronDown, ChevronRight } from "lucide-react";
+import { FileCode, FileText, Paintbrush, Sparkles, FolderOpen, ChevronDown, ChevronRight, Download } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { SourceCategory } from "@/lib/api";
+import { PROXY_URL } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface FileTreeProps {
@@ -86,7 +87,7 @@ export function FileTree({ categories, selectedFile, onSelectFile }: FileTreePro
                           isSelected && "bg-accent text-accent-foreground"
                         )}
                       >
-                        <span className="truncate flex-1 font-mono">{file.name}</span>
+                        <span className="truncate flex-1 font-mono">{file.displayName ?? file.name}</span>
                         <span className="text-[10px] text-muted-foreground shrink-0">
                           {formatSize(file.sizeBytes)}
                         </span>
@@ -103,6 +104,18 @@ export function FileTree({ categories, selectedFile, onSelectFile }: FileTreePro
             No deobfuscated source available.
             <br />
             Run the deobfuscation script first.
+          </div>
+        )}
+
+        {categories.length > 0 && (
+          <div className="px-2 pt-3 pb-1">
+            <a
+              href={`${PROXY_URL}/api/source/download-all`}
+              className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-md text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Download All (.zip)
+            </a>
           </div>
         )}
       </div>
