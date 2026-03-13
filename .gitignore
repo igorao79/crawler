@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.next/
+*.db
+*.sqlite
+.env
+.env.local
+.turbo/
+coverage/
+*.tsbuildinfo
+.DS_Store
+
+# Crawl output & proxy cache (large binary files)
+proxy-cache/
+output/
+apps/server/proxy-cache/
+apps/server/output/
+apps/server/*.db
+apps/server/data/
