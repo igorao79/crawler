@@ -8,7 +8,7 @@ import { getDatabase } from './db/client.js';
 import { crawlRoutes } from './routes/crawl.js';
 import { projectRoutes } from './routes/projects.js';
 import { addClient } from './ws/progress.js';
-import { proxyPlugin } from './proxy/proxy-plugin.js';
+import { handleProxyRequest } from './proxy/proxy-plugin.js';
 import type { DrizzleDB } from './db/client.js';
 
 // Extend Fastify type to include db
@@ -109,8 +109,8 @@ async function buildServer() {
     return { status: 'ok', timestamp: new Date().toISOString() };
   });
 
-  // Caching reverse proxy — catch-all for lusion.co content (MUST be last)
-  await fastify.register(proxyPlugin);
+  // Caching reverse proxy — catch-all for unmatched routes (serves lusion.co content)
+  fastify.setNotFoundHandler(handleProxyRequest);
 
   return fastify;
 }
