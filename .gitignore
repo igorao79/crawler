@@ -17,3 +17,4 @@ apps/server/proxy-cache/
 apps/server/output/
 apps/server/*.db
 apps/server/data/
+apps/server/readable-source/
