@@ -30,11 +30,12 @@ export function PreviewPanel({ slug, proxyUrl }: PreviewPanelProps) {
 
     // Suppress "Created by Lusion" console messages inside iframe
     try {
-      const iframeWindow = iframeRef.current?.contentWindow;
-      if (iframeWindow) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const iframeWindow = iframeRef.current?.contentWindow as any;
+      if (iframeWindow?.console) {
         const origLog = iframeWindow.console.log;
         iframeWindow.console.log = (...args: unknown[]) => {
-          const str = args.join(" ");
+          const str = args.map(String).join(" ");
           if (str.includes("Lusion") || str.includes("lusion.co")) return;
           origLog.apply(iframeWindow.console, args);
         };
