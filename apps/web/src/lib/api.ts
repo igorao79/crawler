@@ -163,4 +163,26 @@ export async function getSourceFile(category: string, name: string): Promise<str
   return res.text();
 }
 
+// ===== Assets API =====
+
+export interface AssetIndexItem {
+  path: string;
+  ext: string;
+}
+
+export interface AssetIndexCategory {
+  name: string;
+  count: number;
+  items: AssetIndexItem[];
+}
+
+export interface AssetIndex {
+  categories: AssetIndexCategory[];
+  total: number;
+}
+
+export function getAssetIndex(): Promise<AssetIndex> {
+  return apiFetch('/api/source/assets');
+}
+
 export { type CrawlJobResponse, type ProjectListItem, type PaginatedProjects, type AssetItem, type PageItem };

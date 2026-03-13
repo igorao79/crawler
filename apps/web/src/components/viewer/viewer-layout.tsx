@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Monitor, Code, Image } from "lucide-react";
+import { Monitor, Code, Package } from "lucide-react";
 import { PreviewPanel } from "./preview-panel";
 import { CodePanel } from "./code-panel";
+import { AssetsPanel } from "./assets-panel";
 import { PROXY_URL } from "@/lib/api";
 
 interface ViewerLayoutProps {
@@ -13,7 +14,7 @@ interface ViewerLayoutProps {
 const tabs = [
   { id: "preview", label: "Preview", icon: Monitor },
   { id: "code", label: "Source Code", icon: Code },
-  { id: "assets", label: "Assets", icon: Image },
+  { id: "assets", label: "Assets", icon: Package },
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
@@ -60,15 +61,7 @@ export function ViewerLayout({ slug }: ViewerLayoutProps) {
           <CodePanel />
         )}
         {activeTab === "assets" && (
-          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-            <div className="text-center space-y-3">
-              <Image className="h-10 w-10 mx-auto text-muted-foreground/40" />
-              <p>Asset browser coming soon</p>
-              <p className="text-xs text-muted-foreground/60">
-                3D models, textures, fonts and more
-              </p>
-            </div>
-          </div>
+          <AssetsPanel />
         )}
       </div>
     </div>

@@ -174,6 +174,35 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
     reply.header('Content-Type', 'text/plain; charset=utf-8');
     return reply.send(content);
   });
+
+  // GET /api/source/assets — parsed asset index from ASSETS.md
+  fastify.get('/api/source/assets', async (_request, reply) => {
+    const assetsPath = join(READABLE_SOURCE_DIR, 'assets-index', 'ASSETS.md');
+    if (!existsSync(assetsPath)) {
+      return reply.send({ categories: [], total: 0 });
+    }
+
+    const content = readFileSync(assetsPath, 'utf-8');
+    const categories: { name: string; count: number; items: { path: string; ext: string }[] }[] = [];
+    let currentCategory: (typeof categories)[0] | null = null;
+
+    for (const line of content.split('\n')) {
+      const headerMatch = line.match(/^## (.+?) \((\d+)\)/);
+      if (headerMatch) {
+        currentCategory = { name: headerMatch[1], count: parseInt(headerMatch[2]), items: [] };
+        categories.push(currentCategory);
+        continue;
+      }
+      if (currentCategory && line.startsWith('- ')) {
+        const path = line.slice(2).trim().replace(/\\/g, '/');
+        const ext = path.split('.').pop() || '';
+        currentCategory.items.push({ path, ext });
+      }
+    }
+
+    const total = categories.reduce((sum, c) => sum + c.items.length, 0);
+    return reply.send({ categories, total });
+  });
 }
 
 function parseJsonArray(value: string | null): string[] {
