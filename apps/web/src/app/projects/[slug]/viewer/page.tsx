@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import { ViewerLayout } from "@/components/viewer/viewer-layout";
 import { getProject, type ProjectDetail } from "@/lib/api";
 
@@ -32,21 +32,29 @@ export default function ViewerPage() {
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
       {/* Header */}
-      <div className="flex items-center gap-4 px-4 py-2 border-b border-border bg-background shrink-0">
+      <div className="flex items-center gap-4 px-4 py-2 border-b border-white/[0.08] bg-background/80 backdrop-blur-md shrink-0">
         <Link
           href={`/projects/${slug}`}
-          className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-[#c1ff00] transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
           Back
         </Link>
-        <div className="h-4 w-px bg-border" />
+        <div className="h-4 w-px bg-white/[0.1]" />
         <h1 className="text-sm font-semibold truncate">
           {project?.title ?? slug}
         </h1>
-        <span className="text-xs text-muted-foreground">
-          Preview + Source Code
-        </span>
+        {project?.url && (
+          <a
+            href={project.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-[#c1ff00] transition-colors"
+          >
+            <ExternalLink className="h-3 w-3" />
+            Original
+          </a>
+        )}
       </div>
 
       {/* Viewer */}

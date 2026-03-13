@@ -1,10 +1,6 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { startCrawl, cancelCrawl } from "@/lib/api";
@@ -23,12 +19,11 @@ export default function CrawlPage() {
   const isDone = progress?.status === "done";
   const isError = progress?.status === "error";
 
-  // Track current URL changes via ref to avoid infinite re-renders
   const lastLoggedUrl = useRef<string>("");
   useEffect(() => {
     if (progress?.currentUrl && progress.currentUrl !== lastLoggedUrl.current) {
       lastLoggedUrl.current = progress.currentUrl;
-      setLogs((prev) => [...prev, `Parsing: ${progress.currentUrl}`]);
+      setLogs((prev) => [...prev, `[OK] ${progress.currentUrl}`]);
     }
   }, [progress?.currentUrl]);
 
@@ -39,7 +34,7 @@ export default function CrawlPage() {
     try {
       const job = await startCrawl(maxDepth);
       setJobId(job.id);
-      setLogs((prev) => [...prev, `Crawl started: ${job.id}`]);
+      setLogs([`> Crawl initiated [${job.id.slice(0, 8)}]`, `> Max depth: ${maxDepth}`, `> Target: lusion.co`]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start crawl");
     } finally {
@@ -51,7 +46,7 @@ export default function CrawlPage() {
     if (!jobId) return;
     try {
       await cancelCrawl(jobId);
-      setLogs((prev) => [...prev, "Crawl cancelled"]);
+      setLogs((prev) => [...prev, "[!] Crawl cancelled by user"]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to cancel");
     }
@@ -63,98 +58,143 @@ export default function CrawlPage() {
       : 0;
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Crawl Manager</h1>
+    <div className="space-y-8">
+      <div className="animate-fade-in-up animate-fade-in-up-1">
+        <h1 className="text-4xl font-bold tracking-tight">
+          <span className="text-[#c1ff00] glow-text-green">Crawl</span>
+          <span className="text-muted-foreground font-light ml-2">Manager</span>
+        </h1>
+      </div>
 
-      {/* Settings */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Settings</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center gap-4">
-            <label className="text-sm font-medium w-32">Max Depth (1-5)</label>
-            <Input
-              type="number"
-              min={1}
-              max={5}
-              value={maxDepth}
-              onChange={(e) => setMaxDepth(Math.min(5, Math.max(1, parseInt(e.target.value, 10) || 1)))}
-              className="w-24"
-            />
+      {/* Controls */}
+      <div className="glass-card rounded-xl p-6 animate-fade-in-up animate-fade-in-up-2">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3">
+            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Depth
+            </label>
+            <div className="flex items-center gap-1">
+              {[1, 2, 3, 4, 5].map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setMaxDepth(d)}
+                  className={`w-8 h-8 rounded-lg text-sm font-mono transition-all ${
+                    d === maxDepth
+                      ? "bg-[#c1ff00] text-[#050510] font-bold shadow-[0_0_15px_rgba(193,255,0,0.3)]"
+                      : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08]"
+                  }`}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="flex gap-2">
-            <Button onClick={handleStart} disabled={starting || isRunning}>
-              {starting ? "Starting..." : "Start Crawl"}
-            </Button>
+          <div className="flex-1" />
+
+          <div className="flex items-center gap-2">
             {isRunning && (
-              <Button variant="destructive" onClick={handleCancel}>
+              <button
+                onClick={handleCancel}
+                className="px-4 py-2 rounded-lg text-sm bg-[#ff4c41]/10 text-[#ff4c41] border border-[#ff4c41]/20 hover:bg-[#ff4c41]/20 transition-all"
+              >
                 Cancel
-              </Button>
+              </button>
             )}
+            <button
+              onClick={handleStart}
+              disabled={starting || isRunning}
+              className="btn-neon px-6 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {starting ? "Starting..." : isRunning ? "Running..." : "Execute Crawl"}
+            </button>
           </div>
+        </div>
 
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </CardContent>
-      </Card>
+        {error && (
+          <p className="text-sm text-[#ff4c41] mt-3">{error}</p>
+        )}
+      </div>
 
       {/* Progress */}
       {jobId && (
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle>Progress</CardTitle>
-            <div className="flex items-center gap-2">
-              <Badge variant={connected ? "default" : "secondary"}>
-                {connected ? "Connected" : "Disconnected"}
-              </Badge>
-              <Badge
-                variant={
-                  isDone ? "default" : isError ? "destructive" : "secondary"
-                }
-              >
-                {progress?.status ?? "pending"}
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <div className="flex justify-between text-sm">
-                <span>
-                  {progress?.parsed ?? 0} / {progress?.total ?? 0} pages
+        <div className="glass-card rounded-xl p-6 animate-fade-in-up animate-fade-in-up-3">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Progress
+              </span>
+              <div className="flex items-center gap-2">
+                <span className={`neon-dot ${connected ? "" : "neon-dot-red"}`} />
+                <span className="text-xs text-muted-foreground">
+                  {connected ? "Connected" : "Disconnected"}
                 </span>
-                <span>{progressPercent}%</span>
               </div>
-              <Progress value={progressPercent} />
             </div>
+            <Badge
+              variant="outline"
+              className="border-current"
+              style={{
+                color: isDone ? "#c1ff00" : isError ? "#ff4c41" : "#1a2ffb",
+              }}
+            >
+              {progress?.status ?? "pending"}
+            </Badge>
+          </div>
 
-            {progress?.currentUrl && (
-              <p className="text-sm text-muted-foreground truncate">
-                Current: {progress.currentUrl}
-              </p>
-            )}
-          </CardContent>
-        </Card>
+          {/* Custom progress bar */}
+          <div className="relative h-2 rounded-full bg-white/[0.06] overflow-hidden">
+            <div
+              className="progress-neon h-full rounded-full"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+          <div className="flex justify-between mt-2 text-xs text-muted-foreground font-mono">
+            <span>{progress?.parsed ?? 0} / {progress?.total ?? 0} pages</span>
+            <span>{progressPercent}%</span>
+          </div>
+
+          {progress?.currentUrl && (
+            <p className="text-xs text-muted-foreground font-mono mt-3 truncate">
+              &gt; {progress.currentUrl}
+            </p>
+          )}
+        </div>
       )}
 
-      {/* Logs */}
+      {/* Terminal-style logs */}
       {logs.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Crawl Log</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ScrollArea className="h-64 rounded-md border p-4">
-              <div className="space-y-1 font-mono text-xs">
+        <div className="animate-fade-in-up animate-fade-in-up-4">
+          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
+            Crawl Log
+          </div>
+          <div className="glass-card rounded-xl overflow-hidden">
+            <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06]">
+              <div className="w-2.5 h-2.5 rounded-full bg-[#ff4c41]/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-[#c1ff00]/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-[#1a2ffb]/60" />
+              <span className="text-[10px] text-muted-foreground ml-2 font-mono">
+                lusion-crawler
+              </span>
+            </div>
+            <ScrollArea className="h-64 p-4">
+              <div className="terminal-log space-y-0.5">
                 {logs.map((log, i) => (
-                  <div key={i} className="text-muted-foreground">
+                  <div
+                    key={i}
+                    className={
+                      log.startsWith("[OK]") ? "log-success" :
+                      log.startsWith("[!]") ? "log-error" :
+                      log.startsWith(">") ? "log-info" : ""
+                    }
+                  >
                     {log}
                   </div>
                 ))}
               </div>
             </ScrollArea>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       )}
     </div>
   );

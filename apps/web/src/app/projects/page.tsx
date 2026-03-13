@@ -2,10 +2,6 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { getProjects, type ProjectListItem } from "@/lib/api";
 
 export default function ProjectsPage() {
@@ -33,55 +29,52 @@ export default function ProjectsPage() {
       .finally(() => setLoading(false));
   }, [page, search, activeTag]);
 
-  // Collect all unique tags
   const allTags = [...new Set(projects.flatMap((p) => p.tags))];
   const totalPages = Math.ceil(total / pageSize);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Projects</h1>
-        <span className="text-sm text-muted-foreground">{total} total</span>
+    <div className="space-y-8">
+      <div className="flex items-end justify-between animate-fade-in-up animate-fade-in-up-1">
+        <div>
+          <h1 className="text-4xl font-bold tracking-tight">
+            <span className="text-[#c1ff00] glow-text-green">Projects</span>
+          </h1>
+          <p className="text-muted-foreground mt-1">{total} crawled projects</p>
+        </div>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
-        <Input
-          placeholder="Search projects..."
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            setPage(1);
-          }}
-          className="w-64"
-        />
-        <div className="flex gap-1 flex-wrap">
+      {/* Search & filters */}
+      <div className="flex flex-wrap items-center gap-3 animate-fade-in-up animate-fade-in-up-2">
+        <div className="relative">
+          <input
+            placeholder="Search projects..."
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+            }}
+            className="w-64 h-9 px-4 rounded-lg text-sm bg-white/[0.04] border border-white/[0.08] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-[#c1ff00]/30 focus:shadow-[0_0_15px_rgba(193,255,0,0.1)] transition-all"
+          />
+        </div>
+        <div className="flex gap-1.5 flex-wrap">
           {activeTag && (
-            <Badge
-              variant="default"
-              className="cursor-pointer"
-              onClick={() => {
-                setActiveTag(null);
-                setPage(1);
-              }}
+            <button
+              onClick={() => { setActiveTag(null); setPage(1); }}
+              className="text-xs px-3 py-1 rounded-full bg-[#c1ff00]/15 text-[#c1ff00] border border-[#c1ff00]/30 hover:bg-[#c1ff00]/25 transition-all"
             >
-              {activeTag} x
-            </Badge>
+              {activeTag} ✕
+            </button>
           )}
           {allTags
             .filter((t) => t !== activeTag)
             .map((tag) => (
-              <Badge
+              <button
                 key={tag}
-                variant="outline"
-                className="cursor-pointer hover:bg-accent"
-                onClick={() => {
-                  setActiveTag(tag);
-                  setPage(1);
-                }}
+                onClick={() => { setActiveTag(tag); setPage(1); }}
+                className="text-xs px-3 py-1 rounded-full border border-white/10 text-muted-foreground hover:border-white/20 hover:text-foreground transition-all"
               >
                 {tag}
-              </Badge>
+              </button>
             ))}
         </div>
       </div>
@@ -90,37 +83,44 @@ export default function ProjectsPage() {
       {loading ? (
         <div className="text-center text-muted-foreground py-12">Loading...</div>
       ) : projects.length === 0 ? (
-        <div className="text-center text-muted-foreground py-12">
+        <div className="glass-card rounded-xl p-12 text-center text-muted-foreground">
           No projects found. Run a crawl first.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {projects.map((project) => (
-            <Link key={project.id} href={`/projects/${project.slug}`}>
-              <Card className="hover:border-primary/50 transition-colors cursor-pointer h-full">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base">
-                    {project.title ?? project.slug}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {project.description && (
-                    <p className="text-sm text-muted-foreground line-clamp-2">
-                      {project.description}
-                    </p>
-                  )}
-                  <div className="flex gap-1 flex-wrap">
-                    {project.tags.map((tag) => (
-                      <Badge key={tag} variant="outline" className="text-xs">
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
-                  <p className="text-xs text-muted-foreground truncate">
-                    {project.url}
-                  </p>
-                </CardContent>
-              </Card>
+          {projects.map((project, i) => (
+            <Link
+              key={project.id}
+              href={`/projects/${project.slug}`}
+              className="glass-card rounded-xl p-5 group animate-fade-in-up"
+              style={{ animationDelay: `${0.1 + i * 0.03}s`, opacity: 0 }}
+            >
+              <div className="flex items-start justify-between mb-3">
+                <h3 className="font-semibold group-hover:text-[#c1ff00] transition-colors">
+                  {project.title ?? project.slug}
+                </h3>
+                <svg className="w-4 h-4 text-muted-foreground group-hover:text-[#c1ff00] transition-colors opacity-0 group-hover:opacity-100 -translate-x-1 group-hover:translate-x-0 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
+              {project.description && (
+                <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
+                  {project.description}
+                </p>
+              )}
+              <div className="flex gap-1.5 flex-wrap mb-3">
+                {project.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="text-[10px] px-2 py-0.5 rounded-full border border-white/10 text-muted-foreground"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground/60 font-mono truncate">
+                {project.url}
+              </p>
             </Link>
           ))}
         </div>
@@ -128,26 +128,24 @@ export default function ProjectsPage() {
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
+        <div className="flex items-center justify-center gap-3">
+          <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page === 1}
+            className="px-4 py-2 rounded-lg text-sm bg-white/[0.04] border border-white/[0.08] text-muted-foreground hover:text-foreground hover:border-white/[0.15] disabled:opacity-30 transition-all"
           >
             Previous
-          </Button>
-          <span className="text-sm text-muted-foreground">
-            Page {page} of {totalPages}
+          </button>
+          <span className="text-xs text-muted-foreground font-mono">
+            {page} / {totalPages}
           </span>
-          <Button
-            variant="outline"
-            size="sm"
+          <button
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page === totalPages}
+            className="px-4 py-2 rounded-lg text-sm bg-white/[0.04] border border-white/[0.08] text-muted-foreground hover:text-foreground hover:border-white/[0.15] disabled:opacity-30 transition-all"
           >
             Next
-          </Button>
+          </button>
         </div>
       )}
     </div>

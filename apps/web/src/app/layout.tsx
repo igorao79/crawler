@@ -26,27 +26,38 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen bg-grid bg-noise`}
       >
-        <header className="border-b border-border bg-card">
-          <nav className="container mx-auto flex items-center gap-6 px-4 py-3">
-            <Link href="/" className="text-lg font-bold tracking-tight">
-              Lusion Crawler
+        <header className="sticky top-0 z-40 glass-card border-0 border-b border-white/[0.06]">
+          <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-[#c1ff00]/30 to-transparent" />
+          <nav className="container mx-auto flex items-center gap-8 px-6 py-4">
+            <Link href="/" className="flex items-center gap-2 group">
+              <div className="w-2 h-2 rounded-full bg-[#c1ff00] shadow-[0_0_8px_#c1ff00] group-hover:shadow-[0_0_16px_#c1ff00] transition-shadow" />
+              <span className="text-lg font-bold tracking-tight text-foreground">
+                LUSION
+              </span>
+              <span className="text-lg font-light tracking-tight text-muted-foreground">
+                CRAWLER
+              </span>
             </Link>
-            <div className="flex items-center gap-4 text-sm text-muted-foreground">
-              <Link href="/" className="hover:text-foreground transition-colors">
-                Dashboard
-              </Link>
-              <Link href="/crawl" className="hover:text-foreground transition-colors">
-                Crawl
-              </Link>
-              <Link href="/projects" className="hover:text-foreground transition-colors">
-                Projects
-              </Link>
+            <div className="flex items-center gap-1 text-sm">
+              {[
+                { href: "/", label: "Dashboard" },
+                { href: "/crawl", label: "Crawl" },
+                { href: "/projects", label: "Projects" },
+              ].map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className="px-3 py-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/[0.04] transition-all duration-200"
+                >
+                  {item.label}
+                </Link>
+              ))}
             </div>
           </nav>
         </header>
-        <main className="container mx-auto px-4 py-6">
+        <main className="container mx-auto px-6 py-8">
           {children}
         </main>
       </body>
