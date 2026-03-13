@@ -17,6 +17,7 @@
     "node": ">=18"
   },
   "devDependencies": {
+    "prettier": "^3.8.1",
     "tinyexec": "^0.3.2"
   }
 }

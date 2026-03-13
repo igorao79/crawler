@@ -1,7 +1,12 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { eq, like, sql } from 'drizzle-orm';
+import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
+import { join, resolve } from 'path';
 import * as schema from '../db/schema.js';
 import type { DrizzleDB } from '../db/client.js';
+
+const READABLE_SOURCE_DIR = './readable-source';
+const VALID_CATEGORIES = ['js', 'css', 'html', 'shaders', 'assets-index'];
 
 interface ProjectParams {
   slug: string;
@@ -104,6 +109,70 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       assets: projectAssets,
       pages: projectPages,
     });
+  });
+
+  // GET /api/source/tree — file tree of deobfuscated source
+  fastify.get('/api/source/tree', async (_request, reply) => {
+    if (!existsSync(READABLE_SOURCE_DIR)) {
+      return reply.send({ categories: [] });
+    }
+
+    const categories = VALID_CATEGORIES
+      .filter((cat) => existsSync(join(READABLE_SOURCE_DIR, cat)))
+      .map((cat) => {
+        const dir = join(READABLE_SOURCE_DIR, cat);
+        const files = readdirSync(dir)
+          .filter((f) => !f.endsWith('.meta.json'))
+          .map((f) => {
+            const stat = statSync(join(dir, f));
+            return { name: f, sizeBytes: stat.size };
+          })
+          .sort((a, b) => b.sizeBytes - a.sizeBytes);
+        return { name: cat, files };
+      });
+
+    return reply.send({ categories });
+  });
+
+  // GET /api/source/file — raw text content of a deobfuscated file
+  fastify.get<{
+    Querystring: { category?: string; name?: string; download?: string };
+  }>('/api/source/file', async (request, reply) => {
+    const { category, name, download } = request.query;
+
+    if (!category || !name) {
+      return reply.status(400).send({ error: 'category and name are required' });
+    }
+
+    if (!VALID_CATEGORIES.includes(category)) {
+      return reply.status(400).send({ error: 'invalid category' });
+    }
+
+    // Path traversal protection
+    if (name.includes('..') || name.includes('/') || name.includes('\\')) {
+      return reply.status(400).send({ error: 'invalid filename' });
+    }
+
+    const filePath = resolve(READABLE_SOURCE_DIR, category, name);
+    const safeBase = resolve(READABLE_SOURCE_DIR);
+    if (!filePath.startsWith(safeBase)) {
+      return reply.status(400).send({ error: 'invalid path' });
+    }
+
+    if (!existsSync(filePath)) {
+      return reply.status(404).send({ error: 'file not found' });
+    }
+
+    const content = readFileSync(filePath, 'utf-8');
+
+    if (download === 'true') {
+      reply.header('Content-Disposition', `attachment; filename="${name}"`);
+    } else {
+      reply.header('Content-Disposition', 'inline');
+    }
+
+    reply.header('Content-Type', 'text/plain; charset=utf-8');
+    return reply.send(content);
   });
 }
 
