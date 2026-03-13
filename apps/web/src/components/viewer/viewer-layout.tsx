@@ -4,10 +4,10 @@ import { useState } from "react";
 import { Monitor, Code, Image } from "lucide-react";
 import { PreviewPanel } from "./preview-panel";
 import { CodePanel } from "./code-panel";
+import { PROXY_URL } from "@/lib/api";
 
 interface ViewerLayoutProps {
   slug: string;
-  proxyUrl?: string;
 }
 
 const tabs = [
@@ -18,7 +18,8 @@ const tabs = [
 
 type TabId = (typeof tabs)[number]["id"];
 
-export function ViewerLayout({ slug, proxyUrl = "http://localhost:3002" }: ViewerLayoutProps) {
+export function ViewerLayout({ slug }: ViewerLayoutProps) {
+  const proxyUrl = PROXY_URL;
   const [activeTab, setActiveTab] = useState<TabId>("preview");
 
   return (

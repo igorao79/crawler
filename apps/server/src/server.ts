@@ -8,6 +8,7 @@ import { getDatabase } from './db/client.js';
 import { crawlRoutes } from './routes/crawl.js';
 import { projectRoutes } from './routes/projects.js';
 import { addClient } from './ws/progress.js';
+import { proxyPlugin } from './proxy/proxy-plugin.js';
 import type { DrizzleDB } from './db/client.js';
 
 // Extend Fastify type to include db
@@ -24,9 +25,13 @@ async function buildServer() {
   const db = getDatabase();
   fastify.decorate('db', db);
 
-  // CORS
+  // CORS — allow configured origins or default to localhost
+  const allowedOrigins = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim())
+    : ['http://localhost:3000', 'http://localhost:3001'];
+
   await fastify.register(cors, {
-    origin: ['http://localhost:3000', 'http://localhost:3001'],
+    origin: allowedOrigins,
     methods: ['GET', 'POST', 'DELETE', 'PUT', 'PATCH'],
   });
 
@@ -60,14 +65,10 @@ async function buildServer() {
       return reply.status(404).send({ error: 'not_found' });
     }
     let html = readFileSync(htmlPath, 'utf-8');
-    // Remove all <script> tags (both inline and external) to prevent SPA redirect
     html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
-    // Fix asset paths to point to the static preview prefix
     html = html.replace(/href="css\//g, `href="/preview/${slug}/css/`);
     html = html.replace(/href="\.\/assets\//g, `href="/preview/${slug}/assets/`);
-    // Add a base tag so relative paths resolve correctly, plus CSS overrides to show hidden SPA content
     const overrideCSS = `<style>
-      /* Force-show content hidden by SPA JS */
       #canvas { display: none !important; }
       #preloader { display: none !important; }
       #transition-overlay { display: none !important; }
@@ -91,11 +92,9 @@ async function buildServer() {
       #scroll-indicator { display: none !important; }
       #ui { position: relative !important; }
       body { background: #121414 !important; color: #fff !important; overflow: auto !important; }
-      /* Show the screenshot as hero image */
     </style>`;
     html = html.replace('<head>', `<head><base href="/preview/${slug}/">${overrideCSS}`);
 
-    // Also inject the screenshot as a visible image if it exists
     const screenshotExists = existsSync(resolve(`./output/${slug}/screenshot.png`));
     if (screenshotExists) {
       html = html.replace('<div id="project-details-items-wrapper">',
@@ -110,6 +109,9 @@ async function buildServer() {
     return { status: 'ok', timestamp: new Date().toISOString() };
   });
 
+  // Caching reverse proxy — catch-all for lusion.co content (MUST be last)
+  await fastify.register(proxyPlugin);
+
   return fastify;
 }
 
@@ -120,6 +122,7 @@ async function main() {
   try {
     await server.listen({ port, host: '0.0.0.0' });
     console.log(`Server running on http://localhost:${port}`);
+    console.log(`Proxy integrated — lusion.co content served from same port`);
   } catch (err) {
     server.log.error(err);
     process.exit(1);

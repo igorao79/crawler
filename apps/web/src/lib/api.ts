@@ -1,5 +1,9 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
+// Proxy URL — in production, proxy is integrated into the same server
+// In dev, separate proxy runs on port 3002
+export const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL ?? 'http://localhost:3002';
+
 interface FetchOptions {
   method?: string;
   body?: unknown;
