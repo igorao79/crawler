@@ -50,10 +50,14 @@ function rewriteJs(js: string): string {
 }
 
 function stripLusionBranding(code: string): string {
-  code = code.replace(/console\.log\s*\([^)]*[Cc]reated\s+by\s+Lusion[^)]*\)\s*;?/g, '');
-  code = code.replace(/console\.log\s*\([^)]*lusion\.co[^)]*\)\s*;?/g, '');
-  code = code.replace(/console\.log\s*\([^)]*https?:\/\/lusion\.co[^)]*\)\s*;?/g, '');
-  code = code.replace(/console\.log\s*\([^)]*["'`]Created by[^)]*Lusion[^)]*\)\s*;?/g, '');
+  // Replace with void 0 (not empty string) to avoid syntax errors in comma expressions
+  // e.g. (console.clear(),console.log("Created by Lusion")) → (console.clear(),void 0)
+  code = code.replace(/console\.log\s*\([^)]*[Cc]reated\s+by\s+Lusion[^)]*\)/g, 'void 0');
+  code = code.replace(/console\.log\s*\([^)]*lusion\.co[^)]*\)/g, 'void 0');
+  code = code.replace(/console\.log\s*\([^)]*https?:\/\/lusion\.co[^)]*\)/g, 'void 0');
+  code = code.replace(/console\.log\s*\([^)]*["'`]Created by[^)]*Lusion[^)]*\)/g, 'void 0');
+  // Also neutralize console.clear that often accompanies the branding
+  code = code.replace(/console\.clear\s*\(\s*\)\s*&&\s*console\.clear\s*\(\s*\)\s*,\s*void 0/g, 'void 0');
   return code;
 }
 
