@@ -41,7 +41,23 @@ interface CacheMeta {
 
 function rewriteHtml(html: string): string {
   html = html.replace(/<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
+  // Strip Lusion branding console.log calls from inline scripts
+  html = stripLusionBranding(html);
   return html;
+}
+
+function rewriteJs(js: string): string {
+  return stripLusionBranding(js);
+}
+
+function stripLusionBranding(code: string): string {
+  // Remove console.log("Created by Lusion...") and variations
+  code = code.replace(/console\.log\s*\([^)]*[Cc]reated\s+by\s+Lusion[^)]*\)\s*;?/g, '');
+  code = code.replace(/console\.log\s*\([^)]*lusion\.co[^)]*\)\s*;?/g, '');
+  code = code.replace(/console\.log\s*\([^)]*https?:\/\/lusion\.co[^)]*\)\s*;?/g, '');
+  // Also catch template literal / multi-arg variants
+  code = code.replace(/console\.log\s*\([^)]*["'`]Created by[^)]*Lusion[^)]*\)\s*;?/g, '');
+  return code;
 }
 
 /**
@@ -91,6 +107,9 @@ export async function proxyPlugin(app: FastifyInstance) {
       if (contentType.includes('text/html')) {
         return reply.send(rewriteHtml(body.toString('utf-8')));
       }
+      if (contentType.includes('javascript')) {
+        return reply.send(rewriteJs(body.toString('utf-8')));
+      }
       return reply.send(body);
     }
 
@@ -133,6 +152,9 @@ export async function proxyPlugin(app: FastifyInstance) {
 
       if (contentType.includes('text/html')) {
         return reply.send(rewriteHtml(buffer.toString('utf-8')));
+      }
+      if (contentType.includes('javascript')) {
+        return reply.send(rewriteJs(buffer.toString('utf-8')));
       }
       return reply.send(buffer);
     } catch (err) {

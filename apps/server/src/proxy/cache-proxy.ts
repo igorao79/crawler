@@ -189,21 +189,26 @@ async function startProxy() {
   console.log(`   Subsequent visits are served from cache (offline)\n`);
 }
 
+function stripLusionBranding(code: string): string {
+  code = code.replace(/console\.log\s*\([^)]*[Cc]reated\s+by\s+Lusion[^)]*\)\s*;?/g, '');
+  code = code.replace(/console\.log\s*\([^)]*lusion\.co[^)]*\)\s*;?/g, '');
+  code = code.replace(/console\.log\s*\([^)]*https?:\/\/lusion\.co[^)]*\)\s*;?/g, '');
+  code = code.replace(/console\.log\s*\([^)]*["'`]Created by[^)]*Lusion[^)]*\)\s*;?/g, '');
+  return code;
+}
+
 function rewriteHtml(html: string): string {
-  // Only remove CSP meta tags that block local scripts
   html = html.replace(/<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
+  html = stripLusionBranding(html);
   return html;
 }
 
 function rewriteCss(css: string): string {
-  // Don't rewrite CSS — the proxy handles all local requests
   return css;
 }
 
 function rewriteJs(js: string): string {
-  // Don't rewrite JS — the proxy handles all requests,
-  // and rewriting can break origin checks, WebSocket URLs, etc.
-  return js;
+  return stripLusionBranding(js);
 }
 
 startProxy().catch((err) => {
