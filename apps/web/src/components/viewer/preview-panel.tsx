@@ -24,10 +24,30 @@ export function PreviewPanel({ slug, proxyUrl }: PreviewPanelProps) {
     }
   };
 
+  const handleLoad = () => {
+    setLoading(false);
+    setError(false);
+
+    // Suppress "Created by Lusion" console messages inside iframe
+    try {
+      const iframeWindow = iframeRef.current?.contentWindow;
+      if (iframeWindow) {
+        const origLog = iframeWindow.console.log;
+        iframeWindow.console.log = (...args: unknown[]) => {
+          const str = args.join(" ");
+          if (str.includes("Lusion") || str.includes("lusion.co")) return;
+          origLog.apply(iframeWindow.console, args);
+        };
+      }
+    } catch {
+      // Cross-origin — can't access, that's fine
+    }
+  };
+
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-muted/50">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-white/[0.08] bg-background/80 backdrop-blur-md">
         <span className="text-xs text-muted-foreground font-mono truncate">
           {src}
         </span>
@@ -46,8 +66,9 @@ export function PreviewPanel({ slug, proxyUrl }: PreviewPanelProps) {
       {/* Iframe */}
       <div className="flex-1 relative bg-black">
         {loading && !error && (
-          <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-sm z-10">
-            Loading 3D preview...
+          <div className="absolute inset-0 flex flex-col items-center justify-center z-10 gap-3">
+            <div className="w-8 h-8 border-2 border-[#c1ff00]/30 border-t-[#c1ff00] rounded-full animate-spin" />
+            <span className="text-muted-foreground text-sm">Loading 3D preview...</span>
           </div>
         )}
         {error && (
@@ -63,8 +84,8 @@ export function PreviewPanel({ slug, proxyUrl }: PreviewPanelProps) {
           ref={iframeRef}
           src={src}
           className="w-full h-full border-0"
-          sandbox="allow-scripts allow-same-origin"
-          onLoad={() => { setLoading(false); setError(false); }}
+          sandbox="allow-scripts allow-same-origin allow-presentation"
+          onLoad={handleLoad}
           onError={() => { setLoading(false); setError(true); }}
         />
       </div>
