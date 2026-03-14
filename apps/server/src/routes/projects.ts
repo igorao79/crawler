@@ -306,6 +306,21 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       '.mjs': 'babel',
     };
 
+    // Rewrite absolute URLs to the original domain → relative paths for local serving
+    const rewriteAbsoluteUrls = (content: string, domain: string): string => {
+      // Replace https://domain/path and http://domain/path with /path
+      const patterns = [
+        new RegExp(`https?://${domain.replace(/\./g, '\\.')}(/[^"'\\s)>]*)`, 'gi'),
+        new RegExp(`https?://${domain.replace(/\./g, '\\.')}(["'\\s)>])`, 'gi'),
+      ];
+      let result = content;
+      // Full URLs with path: https://domain/path → /path
+      result = result.replace(patterns[0], '$1');
+      // Domain-only URLs: https://domain" → /"
+      result = result.replace(patterns[1], '/$1');
+      return result;
+    };
+
     const walkAndAdd = async (dir: string, zipPrefix: string) => {
       if (!existsSync(dir)) return;
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -316,19 +331,27 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
         } else if (!entry.name.endsWith('.meta.json')) {
           const ext = extname(entry.name).toLowerCase();
           const fileSize = statSync(fullPath).size;
-          // Only prettify small files (<500KB) — large minified bundles crash Prettier
-          if (PRETTIFY_EXTS.has(ext) && fileSize < 512_000) {
+          const isTextFile = PRETTIFY_EXTS.has(ext) || ext === '.json' || ext === '.webmanifest';
+
+          // For text files: rewrite absolute domain URLs to relative
+          if (isTextFile && fileSize < 5_000_000) {
             try {
-              const raw = readFileSync(fullPath, 'utf-8');
-              const formatted = await prettier.format(raw, {
-                parser: PRETTIER_PARSERS[ext] || 'babel',
-                printWidth: 100,
-                tabWidth: 2,
-                singleQuote: true,
-              });
-              archive.append(formatted, { name: `${zipFolderName}/${zipPath}` });
+              let content = readFileSync(fullPath, 'utf-8');
+              content = rewriteAbsoluteUrls(content, rawDomain);
+
+              // Prettify small files
+              if (PRETTIFY_EXTS.has(ext) && fileSize < 512_000) {
+                try {
+                  content = await prettier.format(content, {
+                    parser: PRETTIER_PARSERS[ext] || 'babel',
+                    printWidth: 100,
+                    tabWidth: 2,
+                    singleQuote: true,
+                  });
+                } catch { /* use rewritten but unformatted */ }
+              }
+              archive.append(content, { name: `${zipFolderName}/${zipPath}` });
             } catch {
-              // If prettier fails, add raw file
               archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
             }
           } else {
@@ -346,23 +369,28 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       try {
         const parsed = new URL(originalUrl);
         firstHtmlPath = parsed.pathname || '/';
-        // For hash-based SPAs, strip hash but keep the path
-        if (parsed.hash && parsed.hash.length > 1) {
-          // Keep just the pathname — hash routes are client-side
-        }
       } catch { /* use default */ }
     }
-    // Fallback: find first index.html if no URL provided
-    if (firstHtmlPath === '/' && !originalUrl) {
+
+    // Verify that firstHtmlPath actually has an index.html — if not, search for one
+    const firstHtmlFile = join(cacheDir, firstHtmlPath, 'index.html');
+    const firstHtmlDirect = join(cacheDir, firstHtmlPath);
+    const hasRootIndex = existsSync(firstHtmlFile) ||
+      (firstHtmlPath !== '/' && existsSync(firstHtmlDirect) && firstHtmlDirect.endsWith('.html'));
+
+    if (!hasRootIndex) {
+      // Search for the first index.html in the cache
       const findFirstHtml = (dir: string, prefix: string): boolean => {
         if (!existsSync(dir)) return false;
+        // Check current dir first
+        if (existsSync(join(dir, 'index.html'))) {
+          firstHtmlPath = prefix ? `/${prefix}/` : '/';
+          return true;
+        }
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
           if (entry.isDirectory()) {
             const sub = prefix ? `${prefix}/${entry.name}` : entry.name;
             if (findFirstHtml(join(dir, entry.name), sub)) return true;
-          } else if (entry.name === 'index.html') {
-            firstHtmlPath = prefix ? `/${prefix}` : '/';
-            return true;
           }
         }
         return false;
@@ -389,18 +417,33 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       `  ".ktx": "image/ktx", ".ktx2": "image/ktx2", ".gltf": "model/gltf+json",\n` +
       `  ".glb": "model/gltf-binary", ".hdr": "application/octet-stream", ".basis": "application/octet-stream",\n` +
       `};\n\n` +
+      `// Helper: resolve file path trying both decoded and encoded variants\n` +
+      `function resolve(url) {\n` +
+      `  const decoded = decodeURIComponent(url);\n` +
+      `  const raw = url; // keep %20 etc as-is\n` +
+      `  // Try decoded first, then raw (files may be saved with %20 in name)\n` +
+      `  for (const u of [decoded, raw]) {\n` +
+      `    let fp = path.join(ROOT, u);\n` +
+      `    if (fs.existsSync(fp)) return { fp, url: u };\n` +
+      `    // Try with index.html for directories\n` +
+      `    const wi = path.join(fp, "index.html");\n` +
+      `    if (fs.existsSync(wi)) return { fp: wi, url: u };\n` +
+      `  }\n` +
+      `  return { fp: path.join(ROOT, decoded), url: decoded };\n` +
+      `}\n\n` +
       `http.createServer((req, res) => {\n` +
-      `  let url = decodeURIComponent(req.url.split("?")[0]);\n` +
+      `  const rawUrl = req.url.split("?")[0];\n` +
       `  // Redirect root to first available page\n` +
-      `  if (url === "/" && FIRST_PAGE !== "/") {\n` +
+      `  if (rawUrl === "/" && FIRST_PAGE !== "/") {\n` +
       `    res.writeHead(302, { Location: FIRST_PAGE });\n` +
       `    res.end();\n` +
       `    return;\n` +
       `  }\n` +
-      `  let fp = path.join(ROOT, url);\n` +
+      `  const { fp: resolved } = resolve(rawUrl);\n` +
+      `  let fp = resolved;\n` +
       `  // Redirect directories to trailing slash (fixes relative paths in HTML)\n` +
-      `  if (fs.existsSync(fp) && fs.statSync(fp).isDirectory() && !url.endsWith("/")) {\n` +
-      `    res.writeHead(301, { Location: url + "/" });\n` +
+      `  if (fs.existsSync(fp) && fs.statSync(fp).isDirectory() && !rawUrl.endsWith("/")) {\n` +
+      `    res.writeHead(301, { Location: rawUrl + "/" });\n` +
       `    res.end();\n` +
       `    return;\n` +
       `  }\n` +

@@ -309,16 +309,20 @@ export class Crawler {
         // Wait for JS to render dynamic content
         await this.delay(JS_RENDER_WAIT);
 
-        // Auto-scroll to trigger lazy-loaded content (images, 3D models, etc.)
-        await this.autoScroll(page);
+        // Run auto-scroll and click interactions with a hard 8s cap total
+        await Promise.race([
+          (async () => {
+            await this.autoScroll(page);
+            await this.clickInteractiveElements(page);
+          })(),
+          this.delay(8000),
+        ]);
 
-        // Click interactive elements (arrows, tabs, carousels) to trigger dynamic content
-        await this.clickInteractiveElements(page);
-
-        // Wait for network to settle (dynamic asset loading like 3D models, textures)
-        await page.waitForLoadState('networkidle').catch(() => {});
-        // Extra buffer for any final async requests
-        await this.delay(2000);
+        // Wait for network to settle, but cap at 3 seconds
+        await Promise.race([
+          page.waitForLoadState('networkidle').catch(() => {}),
+          this.delay(3000),
+        ]);
 
         const data = await extractPageData(page, url);
 
@@ -461,8 +465,8 @@ export class Crawler {
       await page.evaluate(async () => {
         await new Promise<void>((resolve) => {
           let totalHeight = 0;
-          const distance = 500;
-          const maxScrolls = 50; // Cap at 50 scrolls to avoid infinite pages
+          const distance = 800;
+          const maxScrolls = 20; // Cap scrolls to keep it fast
           let scrolls = 0;
           const timer = setInterval(() => {
             const scrollHeight = document.body.scrollHeight;
@@ -475,11 +479,11 @@ export class Crawler {
               clearInterval(timer);
               resolve();
             }
-          }, 150);
+          }, 80);
         });
       });
-      // Wait for lazy-loaded content to finish loading
-      await this.delay(1000);
+      // Brief wait for lazy-loaded content
+      await this.delay(500);
     } catch { /* ignore scroll errors */ }
   }
 
@@ -531,12 +535,12 @@ export class Crawler {
               el.click();
               clickCount++;
               // Small delay between clicks
-              await new Promise(r => setTimeout(r, 300));
+              await new Promise(r => setTimeout(r, 100));
 
-              if (clickCount >= 30) break; // Cap at 30 clicks
+              if (clickCount >= 15) break; // Cap at 15 clicks
             }
           } catch { /* ignore */ }
-          if (clickCount >= 30) break;
+          if (clickCount >= 15) break;
         }
 
         // Click "next" arrows multiple times to cycle through carousels
@@ -552,9 +556,9 @@ export class Crawler {
             if (nextBtn && nextBtn instanceof HTMLElement) {
               const rect = nextBtn.getBoundingClientRect();
               if (rect.width > 0 && rect.height > 0) {
-                for (let i = 0; i < 10; i++) {
+                for (let i = 0; i < 5; i++) {
                   nextBtn.click();
-                  await new Promise(r => setTimeout(r, 500));
+                  await new Promise(r => setTimeout(r, 200));
                   clickCount++;
                 }
               }
@@ -568,7 +572,7 @@ export class Crawler {
       if (clicked > 0) {
         console.log(`[Crawler] Clicked ${clicked} interactive elements to trigger content loading`);
         // Wait for content triggered by clicks to load
-        await this.delay(2000);
+        await this.delay(500);
       }
     } catch { /* ignore interaction errors */ }
   }
@@ -758,7 +762,7 @@ export class Crawler {
       if (!existsSync(cachePath)) missingUrls.add(f);
     }
 
-    // Filter out likely false positives (common JS variable names, node_modules paths, etc.)
+    // Filter out likely false positives
     const filtered = [...missingUrls].filter(p => {
       // Must have a file extension
       if (!/\.\w{2,5}$/.test(p)) return false;
@@ -767,6 +771,24 @@ export class Crawler {
       // Skip very short names that are likely false matches
       const filename = p.split('/').pop() || '';
       if (filename.length < 3) return false;
+      // Skip paths that look like npm package imports (e.g. zone.js/dist/...)
+      if (/^\/?\w[\w.-]*\//.test(p) && !p.startsWith('/assets') && !p.startsWith('/static') && !p.startsWith('/media') && !p.startsWith('/img') && !p.startsWith('/css') && !p.startsWith('/js') && !p.startsWith('/fonts') && !p.startsWith('/images') && !p.startsWith('/public')) {
+        // Allow if it looks like a real site path (starts with known asset dirs or has multiple segments)
+        const segments = p.split('/').filter(Boolean);
+        // If first segment contains a dot and looks like a package name, skip
+        if (segments[0] && segments[0].includes('.') && !segments[0].startsWith('_') && segments.length > 1) return false;
+      }
+      // Skip Angular internal decorators (ɵdir, ɵinj, etc. -> u0275dir.js, u0275inj.js)
+      if (/u0275\w+\.js$/.test(filename)) return false;
+      // Skip bare filenames without any directory that don't look like real assets
+      // (e.g. "Logartis", "Next.js", "Three.js", "Node.js", "summary_large_image")
+      if (!p.includes('/') || p.split('/').filter(Boolean).length <= 1) {
+        // Only allow known PWA/root files
+        const allowedRootFiles = ['manifest.webmanifest', 'manifest.json', 'ngsw-worker.js', 'sw.js',
+          'service-worker.js', 'favicon.ico', 'favicon-16x16.png', 'favicon-32x32.png', 'ngsw.json',
+          'robots.txt', 'sitemap.xml', 'browserconfig.xml'];
+        if (!allowedRootFiles.includes(filename)) return false;
+      }
       return true;
     });
 
@@ -786,7 +808,11 @@ export class Crawler {
             const url = `https://${this.targetHostname}${assetPath}`;
             const response = await context.request.get(url, { timeout: 5000 });
             if (response.ok()) {
+              // Reject HTML responses — they're error/redirect pages, not real assets
+              const ct = response.headers()['content-type'] || '';
+              if (ct.includes('text/html')) return false;
               const body = await response.body();
+              if (body.length === 0) return false;
               const dir = dirname(cachePath);
               if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
               writeFileSync(cachePath, body);
