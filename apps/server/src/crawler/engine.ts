@@ -9,9 +9,9 @@ import * as schema from '../db/schema.js';
 import type { CrawlProgress, CrawlStatus } from '@lusion-crawler/shared';
 
 const DELAY_MS = 300; // Short delay between requests
-const PAGE_TIMEOUT = 30000;
+const PAGE_TIMEOUT = 60000; // 60s for heavy SPA sites
 const MAX_RETRIES = 2;
-const JS_RENDER_WAIT = 2000; // Reduced - most content loads in 2s
+const JS_RENDER_WAIT = 3000; // Wait for JS rendering
 const OUTPUT_DIR = './output';
 const PROXY_URL = 'http://localhost:3001'; // Route through proxy for caching
 const CONCURRENCY = 3; // Parse 3 pages in parallel
@@ -64,7 +64,12 @@ export class Crawler {
 
       // Step 1: Collect internal URLs from the target site
       this.emitProgress(0, 0, `Collecting URLs from ${this.targetUrl}...`, 'running');
-      const projectUrls = await this.collectProjectUrls();
+      let projectUrls: string[] = [];
+      try {
+        projectUrls = await this.collectProjectUrls();
+      } catch (err) {
+        console.warn(`[Crawler] collectProjectUrls failed, proceeding with target URL only:`, err);
+      }
       console.log(`[Crawler] Found ${projectUrls.length} project URLs`);
 
       // Update total pages
