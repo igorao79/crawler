@@ -1,4 +1,4 @@
-import { chromium, Browser, Page } from 'playwright';
+import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { existsSync, mkdirSync, writeFileSync, readdirSync, statSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { setProxyCookies } from '../proxy/proxy-plugin.js';
@@ -11,13 +11,13 @@ import type { DrizzleDB } from '../db/client.js';
 import * as schema from '../db/schema.js';
 import type { CrawlProgress, CrawlStatus } from '@lusion-crawler/shared';
 
-const DELAY_MS = 300; // Short delay between requests
+const DELAY_MS = 200; // Short delay between requests
 const PAGE_TIMEOUT = 60000; // 60s for heavy SPA sites
 const MAX_RETRIES = 2;
-const JS_RENDER_WAIT = 3000; // Wait for JS rendering
+const JS_RENDER_WAIT = 1500; // Wait for JS rendering (reduced from 3s)
 const OUTPUT_DIR = './output';
 const PROXY_URL = 'http://localhost:3001'; // Route through proxy for caching
-const CONCURRENCY = 3; // Parse 3 pages in parallel
+const CONCURRENCY = 5; // Parse 5 pages in parallel (was 3)
 
 export type ProgressCallback = (progress: CrawlProgress) => void;
 
@@ -31,6 +31,7 @@ export class Crawler {
   private maxPages: number;
   private onProgress: ProgressCallback | null;
   private browser: Browser | null = null;
+  private context: BrowserContext | null = null;
   private aborted = false;
 
   constructor(
@@ -67,6 +68,16 @@ export class Crawler {
           '--no-sandbox',
         ],
       });
+
+      // Shared context for all pages — avoids expensive per-page context creation
+      this.context = await this.browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+      });
+      await this.context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      });
+
       const queue = new CrawlQueue(this.maxDepth, this.targetHostname);
 
       // Step 1: Collect internal URLs from the target site
@@ -196,23 +207,26 @@ export class Crawler {
   }
 
   private async collectProjectUrls(): Promise<string[]> {
-    if (!this.browser) throw new Error('Browser not initialized');
+    if (!this.context) throw new Error('Browser context not initialized');
 
-    const page = await this.browser.newPage({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-    });
-    // Hide webdriver detection
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    });
+    const page = await this.context.newPage();
     try {
       await page.goto(this.targetUrl, {
         waitUntil: 'domcontentloaded',
         timeout: PAGE_TIMEOUT,
       });
-      // Wait for Cloudflare challenge to pass + page render
-      await this.delay(5000);
+      // Smart wait: check for Cloudflare challenge, otherwise just wait for networkidle
+      const hasChallengeFrame = await page.$('iframe[src*="challenges.cloudflare"], #challenge-running, .cf-browser-verification');
+      if (hasChallengeFrame) {
+        console.log('[Crawler] Cloudflare challenge detected, waiting...');
+        await page.waitForNavigation({ timeout: 15000 }).catch(() => {});
+      } else {
+        // Quick networkidle wait instead of fixed 5s
+        await Promise.race([
+          page.waitForLoadState('networkidle').catch(() => {}),
+          this.delay(3000),
+        ]);
+      }
 
       // Extract cookies from browser and pass to proxy for authenticated fetches
       const cookies = await page.context().cookies();
@@ -252,17 +266,11 @@ export class Crawler {
   }
 
   private async parsePage(url: string): Promise<ParsedPage> {
-    if (!this.browser) throw new Error('Browser not initialized');
+    if (!this.context) throw new Error('Browser context not initialized');
 
     let lastError: Error | null = null;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      const page = await this.browser.newPage({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-      });
-      await page.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      });
+      const page = await this.context.newPage();
       const networkAssets: NetworkAsset[] = [];
       const cacheDir = join('./proxy-cache', this.targetHostname);
       if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
@@ -587,7 +595,7 @@ export class Crawler {
     if (!existsSync(cacheDir)) return;
     if (!this.browser) return;
 
-    const context = this.browser.contexts()[0] || await this.browser.newContext();
+    const context = this.context || this.browser.contexts()[0] || await this.browser.newContext();
     let downloaded = 0;
 
     // 1. Download DXT alternates for ASTC textures

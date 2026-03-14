@@ -294,8 +294,16 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       'Transfer-Encoding': 'chunked',
     });
 
-    const archive = archiver('zip', { zlib: { level: 5 } });
+    const archive = archiver('zip', { zlib: { level: 3 } }); // level 3 = faster, ~5% bigger
     archive.pipe(reply.raw);
+
+    // Pre-compressed formats — skip zlib compression (store as-is)
+    const STORE_EXTS = new Set([
+      '.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif', '.ico',
+      '.mp4', '.webm', '.ogg', '.mp3', '.wav',
+      '.woff2', '.woff',
+      '.glb', '.ktx', '.ktx2', '.basis', '.hdr',
+    ]);
 
     // Walk proxy-cache with original site structure, prettify HTML/CSS/JS
     const PRETTIFY_EXTS = new Set(['.html', '.css', '.js', '.mjs']);
@@ -355,7 +363,11 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
               archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
             }
           } else {
-            archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
+            // Skip compression for already-compressed formats (images, video, audio, 3D)
+            archive.file(fullPath, {
+              name: `${zipFolderName}/${zipPath}`,
+              store: STORE_EXTS.has(ext),
+            });
           }
         }
       }
