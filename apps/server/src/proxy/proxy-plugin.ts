@@ -148,19 +148,25 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
     const contentType = res.headers.get('content-type') || 'application/octet-stream';
     const buffer = Buffer.from(await res.arrayBuffer());
 
-    // Cache to disk
-    const cacheFileDir = dirname(cachePath);
-    if (!existsSync(cacheFileDir)) mkdirSync(cacheFileDir, { recursive: true });
-    writeFileSync(cachePath, buffer);
+    // Only cache successful responses (2xx/3xx)
+    if (res.status < 400) {
+      const cacheFileDir = dirname(cachePath);
+      if (!existsSync(cacheFileDir)) mkdirSync(cacheFileDir, { recursive: true });
+      writeFileSync(cachePath, buffer);
+    } else {
+      console.warn(`[PROXY] Not caching ${fullUrl} (status ${res.status})`);
+    }
 
-    const meta: CacheMeta = {
-      contentType,
-      status: res.status,
-      url: fullUrl,
-      headers: Object.fromEntries(res.headers.entries()),
-      cachedAt: new Date().toISOString(),
-    };
-    writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    if (res.status < 400) {
+      const meta: CacheMeta = {
+        contentType,
+        status: res.status,
+        url: fullUrl,
+        headers: Object.fromEntries(res.headers.entries()),
+        cachedAt: new Date().toISOString(),
+      };
+      writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    }
 
     reply.status(res.status);
     reply.header('content-type', contentType);
