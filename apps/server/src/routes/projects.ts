@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { eq, like, sql } from 'drizzle-orm';
 import { existsSync, readdirSync, statSync, readFileSync, createReadStream } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, extname } from 'path';
 import archiver from 'archiver';
+import * as prettier from 'prettier';
 import * as schema from '../db/schema.js';
 import type { DrizzleDB } from '../db/client.js';
 import { aiDeobfuscateFile, listJsFiles } from '../proxy/ai-deobfuscate.js';
@@ -295,21 +296,46 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
     const archive = archiver('zip', { zlib: { level: 5 } });
     archive.pipe(reply.raw);
 
-    // Walk proxy-cache with original site structure
-    const walkAndAdd = (dir: string, zipPrefix: string) => {
+    // Walk proxy-cache with original site structure, prettify HTML/CSS/JS
+    const PRETTIFY_EXTS = new Set(['.html', '.css', '.js', '.mjs']);
+    const PRETTIER_PARSERS: Record<string, string> = {
+      '.html': 'html',
+      '.css': 'css',
+      '.js': 'babel',
+      '.mjs': 'babel',
+    };
+
+    const walkAndAdd = async (dir: string, zipPrefix: string) => {
       if (!existsSync(dir)) return;
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const fullPath = join(dir, entry.name);
         const zipPath = zipPrefix ? `${zipPrefix}/${entry.name}` : entry.name;
         if (entry.isDirectory()) {
-          walkAndAdd(fullPath, zipPath);
+          await walkAndAdd(fullPath, zipPath);
         } else if (!entry.name.endsWith('.meta.json')) {
-          archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
+          const ext = extname(entry.name).toLowerCase();
+          if (PRETTIFY_EXTS.has(ext)) {
+            try {
+              const raw = readFileSync(fullPath, 'utf-8');
+              const formatted = await prettier.format(raw, {
+                parser: PRETTIER_PARSERS[ext] || 'babel',
+                printWidth: 100,
+                tabWidth: 2,
+                singleQuote: true,
+              });
+              archive.append(formatted, { name: `${zipFolderName}/${zipPath}` });
+            } catch {
+              // If prettier fails, add raw file
+              archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
+            }
+          } else {
+            archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
+          }
         }
       }
     };
 
-    walkAndAdd(cacheDir, '');
+    await walkAndAdd(cacheDir, '');
 
     // Find first HTML page for redirect (in case there's no root index.html)
     let firstHtmlPath = '';
