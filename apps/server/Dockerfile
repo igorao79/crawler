@@ -19,6 +19,9 @@ COPY apps/server/ ./apps/server/
 # Install Playwright chromium
 RUN npx playwright install chromium
 
+# Create required directories
+RUN mkdir -p /app/output /app/apps/server/proxy-cache /app/apps/server/data
+
 EXPOSE 3001
 
 CMD ["npx", "tsx", "apps/server/src/server.ts"]

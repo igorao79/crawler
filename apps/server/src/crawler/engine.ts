@@ -73,6 +73,9 @@ export class Crawler {
         .set({ totalPages: projectUrls.length })
         .where(eq(schema.crawlJobs.id, this.jobId));
 
+      // Always add the target URL first
+      queue.add(this.targetUrl, 0);
+
       // Add project URLs to queue (limit if maxPages set)
       const urlsToAdd = this.maxPages > 0 ? projectUrls.slice(0, this.maxPages) : projectUrls;
       for (const url of urlsToAdd) {
