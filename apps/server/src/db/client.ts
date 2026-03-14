@@ -10,6 +10,7 @@ function initTables(sqlite: InstanceType<typeof Database>): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS crawl_jobs (
       id TEXT PRIMARY KEY,
+      url TEXT NOT NULL DEFAULT 'https://lusion.co',
       status TEXT NOT NULL DEFAULT 'pending',
       started_at TEXT,
       finished_at TEXT,

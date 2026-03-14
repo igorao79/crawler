@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 
 export const crawlJobs = sqliteTable('crawl_jobs', {
   id: text('id').primaryKey(),
+  url: text('url').notNull().default('https://lusion.co'),
   status: text('status').notNull().default('pending'),
   startedAt: text('started_at'),
   finishedAt: text('finished_at'),

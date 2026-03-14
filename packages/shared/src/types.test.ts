@@ -43,20 +43,30 @@ describe('type guards', () => {
   });
 
   describe('isCreateCrawlJobRequest', () => {
-    it('accepts empty object', () => {
-      expect(isCreateCrawlJobRequest({})).toBe(true);
+    it('accepts object with valid url', () => {
+      expect(isCreateCrawlJobRequest({ url: 'https://example.com' })).toBe(true);
+      expect(isCreateCrawlJobRequest({ url: 'http://example.com' })).toBe(true);
     });
 
-    it('accepts valid maxDepth', () => {
-      expect(isCreateCrawlJobRequest({ maxDepth: 3 })).toBe(true);
-      expect(isCreateCrawlJobRequest({ maxDepth: 1 })).toBe(true);
-      expect(isCreateCrawlJobRequest({ maxDepth: 5 })).toBe(true);
+    it('rejects object without url', () => {
+      expect(isCreateCrawlJobRequest({})).toBe(false);
+    });
+
+    it('rejects invalid url protocols', () => {
+      expect(isCreateCrawlJobRequest({ url: 'ftp://example.com' })).toBe(false);
+      expect(isCreateCrawlJobRequest({ url: 'not-a-url' })).toBe(false);
+    });
+
+    it('accepts valid maxDepth with url', () => {
+      expect(isCreateCrawlJobRequest({ url: 'https://example.com', maxDepth: 3 })).toBe(true);
+      expect(isCreateCrawlJobRequest({ url: 'https://example.com', maxDepth: 1 })).toBe(true);
+      expect(isCreateCrawlJobRequest({ url: 'https://example.com', maxDepth: 5 })).toBe(true);
     });
 
     it('rejects invalid maxDepth', () => {
-      expect(isCreateCrawlJobRequest({ maxDepth: 0 })).toBe(false);
-      expect(isCreateCrawlJobRequest({ maxDepth: 6 })).toBe(false);
-      expect(isCreateCrawlJobRequest({ maxDepth: 'three' })).toBe(false);
+      expect(isCreateCrawlJobRequest({ url: 'https://example.com', maxDepth: 0 })).toBe(false);
+      expect(isCreateCrawlJobRequest({ url: 'https://example.com', maxDepth: 6 })).toBe(false);
+      expect(isCreateCrawlJobRequest({ url: 'https://example.com', maxDepth: 'three' })).toBe(false);
     });
 
     it('rejects non-objects', () => {

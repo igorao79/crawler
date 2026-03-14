@@ -10,7 +10,6 @@ import type { DrizzleDB } from '../db/client.js';
 import * as schema from '../db/schema.js';
 import type { CrawlProgress, CrawlStatus } from '@lusion-crawler/shared';
 
-const LUSION_BASE = 'https://lusion.co';
 const DELAY_MS = 1500; // Delay between requests to be polite
 const PAGE_TIMEOUT = 60000;
 const MAX_RETRIES = 3;
@@ -22,6 +21,8 @@ export type ProgressCallback = (progress: CrawlProgress) => void;
 export class Crawler {
   private db: DrizzleDB;
   private jobId: string;
+  private targetUrl: string;
+  private targetHostname: string;
   private maxDepth: number;
   private maxPages: number;
   private onProgress: ProgressCallback | null;
@@ -31,12 +32,16 @@ export class Crawler {
   constructor(
     db: DrizzleDB,
     jobId: string,
+    targetUrl: string,
     maxDepth: number = 5,
     onProgress: ProgressCallback | null = null,
     maxPages: number = 0, // 0 = unlimited
   ) {
     this.db = db;
     this.jobId = jobId;
+    // Normalize: ensure trailing slash stripped, no trailing path junk
+    this.targetUrl = targetUrl.replace(/\/+$/, '');
+    this.targetHostname = new URL(this.targetUrl).hostname;
     this.maxDepth = maxDepth;
     this.maxPages = maxPages;
     this.onProgress = onProgress;
@@ -55,10 +60,10 @@ export class Crawler {
           '--no-sandbox',
         ],
       });
-      const queue = new CrawlQueue(this.maxDepth, 'lusion.co');
+      const queue = new CrawlQueue(this.maxDepth, this.targetHostname);
 
-      // Step 1: Collect project URLs from /projects page
-      this.emitProgress(0, 0, 'Collecting project URLs from lusion.co/projects...', 'running');
+      // Step 1: Collect internal URLs from the target site
+      this.emitProgress(0, 0, `Collecting URLs from ${this.targetUrl}...`, 'running');
       const projectUrls = await this.collectProjectUrls();
       console.log(`[Crawler] Found ${projectUrls.length} project URLs`);
 
@@ -158,28 +163,31 @@ export class Crawler {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
     try {
-      await page.goto(`${LUSION_BASE}/projects`, {
+      await page.goto(this.targetUrl, {
         waitUntil: 'domcontentloaded',
         timeout: PAGE_TIMEOUT,
       });
       // Wait for Cloudflare challenge to pass + page render
       await this.delay(5000);
 
-      const urls = await page.evaluate((base: string): string[] => {
+      const targetHostname = this.targetHostname;
+      const urls = await page.evaluate(({ base, hostname }): string[] => {
         const links = document.querySelectorAll('a[href]');
-        const projectUrls: string[] = [];
+        const pageUrls: string[] = [];
         links.forEach((link) => {
           const href = link.getAttribute('href');
-          if (href && href.startsWith('/projects/') && href !== '/projects/') {
-            try {
-              projectUrls.push(new URL(href, base).href);
-            } catch {
-              // skip
+          if (!href) return;
+          try {
+            const resolved = new URL(href, base);
+            if (resolved.hostname === hostname || resolved.hostname.endsWith('.' + hostname)) {
+              pageUrls.push(resolved.href);
             }
+          } catch {
+            // skip
           }
         });
-        return [...new Set(projectUrls)];
-      }, LUSION_BASE);
+        return [...new Set(pageUrls)];
+      }, { base: this.targetUrl, hostname: targetHostname });
 
       return urls;
     } finally {
@@ -383,13 +391,13 @@ export class Crawler {
     localHtml = localHtml.replace(/<base\s+href="[^"]*"\s*\/?>/gi, '');
 
     for (const [originalUrl, localPath] of urlToLocalPath) {
-      // Replace full URLs (https://lusion.co/...)
+      // Replace full URLs (https://example.com/...)
       localHtml = localHtml.split(originalUrl).join(localPath);
 
       // Also replace path-only references (/_astro/..., /assets/...)
       try {
         const parsed = new URL(originalUrl);
-        if (parsed.hostname.includes('lusion.co')) {
+        if (parsed.hostname === this.targetHostname || parsed.hostname.endsWith('.' + this.targetHostname)) {
           localHtml = localHtml.split(parsed.pathname).join(localPath);
         }
       } catch {
@@ -397,8 +405,10 @@ export class Crawler {
       }
     }
 
-    // Replace any remaining absolute paths to lusion.co with relative
-    localHtml = localHtml.replace(/https?:\/\/lusion\.co\//g, '');
+    // Replace any remaining absolute paths to the target with relative
+    const targetOrigin = new URL(this.targetUrl).origin;
+    const escapedOrigin = targetOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    localHtml = localHtml.replace(new RegExp(escapedOrigin + '/', 'g'), '');
 
     // Save rewritten HTML
     writeFileSync(join(projectDir, 'index.html'), localHtml, 'utf-8');
@@ -447,8 +457,10 @@ export class Crawler {
   private extractSlug(url: string): string | null {
     try {
       const pathname = new URL(url).pathname;
-      const match = pathname.match(/\/projects\/([^/]+)/);
-      return match ? match[1] : null;
+      // Create slug from the URL path — strip leading/trailing slashes, replace slashes with dashes
+      const cleaned = pathname.replace(/^\/+|\/+$/g, '');
+      if (!cleaned) return null;
+      return cleaned.replace(/\//g, '-');
     } catch {
       return null;
     }

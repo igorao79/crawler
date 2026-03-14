@@ -36,7 +36,8 @@ export function PreviewPanel({ slug, proxyUrl }: PreviewPanelProps) {
         const origLog = iframeWindow.console.log;
         iframeWindow.console.log = (...args: unknown[]) => {
           const str = args.map(String).join(" ");
-          if (str.includes("Lusion") || str.includes("lusion.co")) return;
+          // Filter noisy console branding messages
+          if (str.includes("Created by") || str.includes("console.clear")) return;
           origLog.apply(iframeWindow.console, args);
         };
       }

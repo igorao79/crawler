@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { eq } from 'drizzle-orm';
 import { Crawler } from '../crawler/engine.js';
 import { broadcastProgress } from '../ws/progress.js';
+import { setProxyTarget } from '../proxy/proxy-plugin.js';
 import * as schema from '../db/schema.js';
 import type { DrizzleDB } from '../db/client.js';
 import { isCreateCrawlJobRequest } from '@lusion-crawler/shared';
@@ -15,6 +16,7 @@ interface CrawlParams {
 }
 
 interface CrawlBody {
+  url: string;
   maxDepth?: number;
   maxPages?: number;
 }
@@ -27,20 +29,26 @@ export async function crawlRoutes(fastify: FastifyInstance): Promise<void> {
     const body = request.body ?? {};
 
     if (!isCreateCrawlJobRequest(body)) {
-      return reply.status(400).send({ error: 'validation', message: 'maxDepth must be between 1 and 5' });
+      return reply.status(400).send({ error: 'validation', message: 'url is required (valid http/https URL) and maxDepth must be between 1 and 5' });
     }
 
+    const targetUrl = (body as CrawlBody).url;
     const maxDepth = body.maxDepth ?? 3;
-    const maxPages = body.maxPages ?? 0;
+    const maxPages = (body as CrawlBody).maxPages ?? 0;
     const jobId = uuidv4();
+
+    // Set the proxy target to the crawled domain
+    const targetOrigin = new URL(targetUrl).origin;
+    setProxyTarget(targetOrigin);
 
     await db.insert(schema.crawlJobs).values({
       id: jobId,
+      url: targetUrl,
       status: 'pending',
       maxDepth,
     });
 
-    const crawler = new Crawler(db, jobId, maxDepth, (progress) => {
+    const crawler = new Crawler(db, jobId, targetUrl, maxDepth, (progress) => {
       broadcastProgress(progress);
     }, maxPages);
 
@@ -53,7 +61,7 @@ export async function crawlRoutes(fastify: FastifyInstance): Promise<void> {
       activeCrawlers.delete(jobId);
     });
 
-    return reply.status(201).send({ id: jobId, status: 'pending' });
+    return reply.status(201).send({ id: jobId, status: 'pending', url: targetUrl });
   });
 
   // GET /api/crawl/:id — get crawl status

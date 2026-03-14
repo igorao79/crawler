@@ -18,8 +18,8 @@ export default function ViewerPage() {
           Back
         </Link>
         <div className="h-4 w-px bg-white/[0.1]" />
-        <h1 className="text-sm font-semibold">lusion.co</h1>
-        <span className="text-xs text-muted-foreground">18 pages · full site</span>
+        <h1 className="text-sm font-semibold">Crawler Viewer</h1>
+        <span className="text-xs text-muted-foreground">crawled site</span>
         <div className="ml-auto flex items-center gap-3">
           <a
             href={`${PROXY_URL}/api/source/download-all`}
@@ -29,7 +29,7 @@ export default function ViewerPage() {
             Download Site
           </a>
           <a
-            href="https://lusion.co"
+            href="#"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-[#c1ff00] transition-colors"

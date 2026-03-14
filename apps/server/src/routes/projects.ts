@@ -5,9 +5,10 @@ import { join, resolve } from 'path';
 import archiver from 'archiver';
 import * as schema from '../db/schema.js';
 import type { DrizzleDB } from '../db/client.js';
+import { aiDeobfuscateFile, listJsFiles } from '../proxy/ai-deobfuscate.js';
 
 const READABLE_SOURCE_DIR = './readable-source';
-const VALID_CATEGORIES = ['js', 'css', 'html', 'shaders', 'assets-index'];
+const VALID_CATEGORIES = ['js', 'css', 'html', 'shaders', 'assets-index', 'ai-deobfuscated'];
 
 interface ProjectParams {
   slug: string;
@@ -205,17 +206,88 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
     return reply.send({ categories, total });
   });
 
+  // GET /api/source/ai-files — list JS files available for AI deobfuscation
+  fastify.get('/api/source/ai-files', async (_request, reply) => {
+    const files = listJsFiles();
+    return reply.send({ files });
+  });
+
+  // POST /api/source/deobfuscate — run AI deobfuscation on a JS file
+  fastify.post<{
+    Body: { fileName: string };
+  }>('/api/source/deobfuscate', async (request, reply) => {
+    const { fileName } = request.body ?? {};
+
+    if (!fileName || typeof fileName !== 'string') {
+      return reply.status(400).send({ error: 'fileName is required' });
+    }
+
+    // Validate filename (no path traversal)
+    if (fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
+      return reply.status(400).send({ error: 'invalid filename' });
+    }
+
+    if (!process.env.GROQ_API_KEY) {
+      return reply.status(500).send({ error: 'GROQ_API_KEY not configured on the server' });
+    }
+
+    // Stream progress as newline-delimited JSON
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Transfer-Encoding': 'chunked',
+      'Cache-Control': 'no-cache',
+      'X-Content-Type-Options': 'nosniff',
+    });
+
+    try {
+      const result = await aiDeobfuscateFile(fileName, (progress) => {
+        reply.raw.write(JSON.stringify(progress) + '\n');
+      });
+
+      reply.raw.write(
+        JSON.stringify({
+          totalChunks: result.chunks,
+          currentChunk: result.chunks,
+          fileName,
+          status: 'done',
+          message: `Saved to ${result.outputPath}`,
+        }) + '\n',
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      reply.raw.write(
+        JSON.stringify({
+          totalChunks: 0,
+          currentChunk: 0,
+          fileName,
+          status: 'error',
+          message: errMsg,
+        }) + '\n',
+      );
+    }
+
+    reply.raw.end();
+    return reply;
+  });
+
   // GET /api/source/download-all — ZIP of full site with original structure + deobfuscated JS/CSS
-  fastify.get('/api/source/download-all', async (_request, reply) => {
+  // Accepts optional ?domain= query parameter for naming the ZIP
+  fastify.get<{ Querystring: { domain?: string } }>('/api/source/download-all', async (request, reply) => {
     const PROXY_CACHE_DIR = './proxy-cache';
 
     if (!existsSync(PROXY_CACHE_DIR)) {
       return reply.status(404).send({ error: 'No cached site found. Run crawl first.' });
     }
 
+    // Use domain from query or fall back to generic name
+    const rawDomain = request.query.domain || 'site';
+    const safeDomain = rawDomain.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const zipFolderName = `${safeDomain}-crawled`;
+    const zipFileName = `${safeDomain}-site.zip`;
+
     reply.raw.writeHead(200, {
       'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="lusion-site.zip"',
+      'Content-Disposition': `attachment; filename="${zipFileName}"`,
       'Transfer-Encoding': 'chunked',
     });
 
@@ -244,9 +316,9 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
           // Check if we have a deobfuscated version
           const deobPath = deobfuscatedMap[zipPath];
           if (deobPath && existsSync(deobPath)) {
-            archive.file(deobPath, { name: `lusion-site/${zipPath}` });
+            archive.file(deobPath, { name: `${zipFolderName}/${zipPath}` });
           } else {
-            archive.file(fullPath, { name: `lusion-site/${zipPath}` });
+            archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
           }
         }
       }
@@ -256,32 +328,63 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
 
     // Also add extra deobfuscated files that don't replace originals
     const extras = [
-      { src: join(READABLE_SOURCE_DIR, 'css', 'design-tokens.css'), dest: 'lusion-site/_extras/design-tokens.css' },
-      { src: join(READABLE_SOURCE_DIR, 'css', 'animations.css'), dest: 'lusion-site/_extras/animations.css' },
-      { src: join(READABLE_SOURCE_DIR, 'shaders', 'extracted-shaders.glsl'), dest: 'lusion-site/_extras/extracted-shaders.glsl' },
-      { src: join(READABLE_SOURCE_DIR, 'assets-index', 'ASSETS.md'), dest: 'lusion-site/_extras/ASSETS.md' },
+      { src: join(READABLE_SOURCE_DIR, 'css', 'design-tokens.css'), dest: `${zipFolderName}/_extras/design-tokens.css` },
+      { src: join(READABLE_SOURCE_DIR, 'css', 'animations.css'), dest: `${zipFolderName}/_extras/animations.css` },
+      { src: join(READABLE_SOURCE_DIR, 'shaders', 'extracted-shaders.glsl'), dest: `${zipFolderName}/_extras/extracted-shaders.glsl` },
+      { src: join(READABLE_SOURCE_DIR, 'assets-index', 'ASSETS.md'), dest: `${zipFolderName}/_extras/ASSETS.md` },
     ];
     for (const { src, dest } of extras) {
       if (existsSync(src)) archive.file(src, { name: dest });
     }
 
+    // Add server.cjs for local serving (npx serve doesn't handle SPA routing)
+    archive.append(
+      `const http = require("http");\n` +
+      `const fs = require("fs");\n` +
+      `const path = require("path");\n\n` +
+      `const PORT = process.env.PORT || 3000;\n` +
+      `const ROOT = __dirname;\n\n` +
+      `const MIME = {\n` +
+      `  ".html": "text/html", ".css": "text/css", ".js": "application/javascript",\n` +
+      `  ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg",\n` +
+      `  ".jpeg": "image/jpeg", ".gif": "image/gif", ".svg": "image/svg+xml",\n` +
+      `  ".ico": "image/x-icon", ".woff2": "font/woff2", ".woff": "font/woff",\n` +
+      `  ".ttf": "font/ttf", ".ogg": "audio/ogg", ".mp4": "video/mp4",\n` +
+      `  ".webm": "video/webm", ".webp": "image/webp", ".buf": "application/octet-stream",\n` +
+      `  ".exr": "application/octet-stream", ".webmanifest": "application/manifest+json",\n` +
+      `};\n\n` +
+      `http.createServer((req, res) => {\n` +
+      `  let url = decodeURIComponent(req.url.split("?")[0]);\n` +
+      `  let fp = path.join(ROOT, url);\n` +
+      `  if (fs.existsSync(fp) && fs.statSync(fp).isDirectory()) fp = path.join(fp, "index.html");\n` +
+      `  if (!fs.existsSync(fp) && !path.extname(fp)) {\n` +
+      `    const wi = path.join(fp, "index.html");\n` +
+      `    fp = fs.existsSync(wi) ? wi : path.join(ROOT, "index.html");\n` +
+      `  }\n` +
+      `  if (!fs.existsSync(fp)) { res.writeHead(404); res.end("Not found"); return; }\n` +
+      `  const ext = path.extname(fp).toLowerCase();\n` +
+      `  res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", "Access-Control-Allow-Origin": "*" });\n` +
+      `  fs.createReadStream(fp).pipe(res);\n` +
+      `}).listen(PORT, () => console.log("${safeDomain} site running at http://localhost:" + PORT));\n`,
+      { name: `${zipFolderName}/server.cjs` }
+    );
+
     // Add a README with instructions
     archive.append(
-      `# Lusion.co — Parsed Site\n\n` +
+      `# ${rawDomain} — Crawled Site\n\n` +
       `## How to run locally\n\n` +
       `1. Extract this ZIP\n` +
-      `2. Open terminal in the extracted folder\n` +
-      `3. Run: npx serve .\n` +
+      `2. Open terminal in the ${zipFolderName} folder\n` +
+      `3. Run: node server.cjs\n` +
       `4. Open http://localhost:3000 in your browser\n\n` +
+      `All navigation will work correctly.\n\n` +
       `## What's inside\n\n` +
       `- Full site with original file structure (HTML, CSS, JS, assets)\n` +
-      `- JS and CSS are deobfuscated (formatted, readable)\n` +
-      `- _extras/ folder contains extracted GLSL shaders, design tokens, animations, and asset catalog\n\n` +
+      `- _extras/ folder may contain extracted design tokens, animations, and asset catalog\n\n` +
       `## Notes\n\n` +
-      `- The JS code is production build — variable names are minified but logic is intact\n` +
-      `- GLSL shaders in _extras/ are the most readable part — almost original source\n` +
-      `- Some external resources (CDN videos) may not load offline\n`,
-      { name: 'lusion-site/README.md' }
+      `- Some external resources (CDN videos, third-party scripts) may not load offline\n` +
+      `- Requires Node.js installed\n`,
+      { name: `${zipFolderName}/README.md` }
     );
 
     await archive.finalize();

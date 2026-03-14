@@ -109,6 +109,7 @@ async function seed() {
   const jobId = 'crawl-lusion-001';
   await db.insert(schema.crawlJobs).values({
     id: jobId,
+    url: 'https://lusion.co',
     status: 'done',
     startedAt: new Date().toISOString(),
     finishedAt: new Date().toISOString(),

@@ -4,8 +4,10 @@ import { join, dirname } from 'path';
 import { createHash } from 'crypto';
 
 const CACHE_DIR = './proxy-cache';
-const TARGET = 'https://lusion.co';
 const PORT = 3002;
+
+// Accept target URL as CLI argument or default to lusion.co
+const TARGET = process.argv[2] || 'https://lusion.co';
 
 // Ensure cache dir exists
 if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
@@ -93,7 +95,7 @@ async function startProxy() {
       reply.header('content-type', contentType);
       reply.header('x-proxy-cache', 'HIT');
 
-      // Rewrite HTML to fix absolute URLs pointing to lusion.co
+      // Rewrite HTML to fix absolute URLs pointing to target
       if (contentType.includes('text/html')) {
         let html = body.toString('utf-8');
         html = rewriteHtml(html);
@@ -181,25 +183,16 @@ async function startProxy() {
   });
 
   await app.listen({ port: PORT, host: '0.0.0.0' });
-  console.log(`\n🚀 Caching reverse proxy running at http://localhost:${PORT}`);
+  console.log(`\nCaching reverse proxy running at http://localhost:${PORT}`);
   console.log(`   Proxying: ${TARGET}`);
   console.log(`   Cache dir: ${CACHE_DIR}`);
-  console.log(`\n   Open http://localhost:${PORT}/projects/ in your Chrome browser`);
-  console.log(`   First visit fetches from lusion.co and caches locally`);
+  console.log(`\n   Open http://localhost:${PORT}/ in your browser`);
+  console.log(`   First visit fetches from ${TARGET} and caches locally`);
   console.log(`   Subsequent visits are served from cache (offline)\n`);
-}
-
-function stripLusionBranding(code: string): string {
-  code = code.replace(/console\.log\s*\([^)]*[Cc]reated\s+by\s+Lusion[^)]*\)\s*;?/g, '');
-  code = code.replace(/console\.log\s*\([^)]*lusion\.co[^)]*\)\s*;?/g, '');
-  code = code.replace(/console\.log\s*\([^)]*https?:\/\/lusion\.co[^)]*\)\s*;?/g, '');
-  code = code.replace(/console\.log\s*\([^)]*["'`]Created by[^)]*Lusion[^)]*\)\s*;?/g, '');
-  return code;
 }
 
 function rewriteHtml(html: string): string {
   html = html.replace(/<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
-  html = stripLusionBranding(html);
   return html;
 }
 
@@ -208,7 +201,7 @@ function rewriteCss(css: string): string {
 }
 
 function rewriteJs(js: string): string {
-  return stripLusionBranding(js);
+  return js;
 }
 
 startProxy().catch((err) => {

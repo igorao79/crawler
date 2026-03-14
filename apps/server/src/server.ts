@@ -109,7 +109,7 @@ async function buildServer() {
     return { status: 'ok', timestamp: new Date().toISOString() };
   });
 
-  // Caching reverse proxy — catch-all for unmatched routes (serves lusion.co content)
+  // Caching reverse proxy — catch-all for unmatched routes (serves crawled site content)
   fastify.setNotFoundHandler(handleProxyRequest);
 
   return fastify;
@@ -122,7 +122,7 @@ async function main() {
   try {
     await server.listen({ port, host: '0.0.0.0' });
     console.log(`Server running on http://localhost:${port}`);
-    console.log(`Proxy integrated — lusion.co content served from same port`);
+    console.log(`Proxy integrated — crawled site content served from same port`);
   } catch (err) {
     server.log.error(err);
     process.exit(1);

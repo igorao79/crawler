@@ -47,8 +47,8 @@ interface CreateCrawlResponse {
   status: string;
 }
 
-export function startCrawl(maxDepth: number): Promise<CreateCrawlResponse> {
-  return apiFetch('/api/crawl', { method: 'POST', body: { maxDepth } });
+export function startCrawl(url: string, maxDepth: number): Promise<CreateCrawlResponse> {
+  return apiFetch('/api/crawl', { method: 'POST', body: { url, maxDepth } });
 }
 
 export function getCrawlStatus(id: string): Promise<CrawlJobResponse> {
@@ -184,6 +184,76 @@ export interface AssetIndex {
 
 export function getAssetIndex(): Promise<AssetIndex> {
   return apiFetch('/api/source/assets');
+}
+
+// ===== AI Deobfuscation API =====
+
+export interface DeobfuscateProgress {
+  totalChunks: number;
+  currentChunk: number;
+  fileName: string;
+  status: 'processing' | 'done' | 'error';
+  message?: string;
+}
+
+/**
+ * Start AI deobfuscation of a JS file.
+ * Streams newline-delimited JSON progress events.
+ */
+export async function startDeobfuscation(
+  fileName: string,
+  onProgress: (progress: DeobfuscateProgress) => void,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/source/deobfuscate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileName }),
+  });
+
+  if (!res.ok) {
+    const errorData: unknown = await res.json().catch(() => null);
+    const message =
+      errorData && typeof errorData === 'object' && 'message' in errorData
+        ? String((errorData as { message: string }).message)
+        : `HTTP ${res.status}`;
+    throw new Error(message);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('No response body');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      if (line.trim()) {
+        try {
+          const progress = JSON.parse(line) as DeobfuscateProgress;
+          onProgress(progress);
+        } catch {
+          // skip malformed lines
+        }
+      }
+    }
+  }
+
+  // Process remaining buffer
+  if (buffer.trim()) {
+    try {
+      const progress = JSON.parse(buffer) as DeobfuscateProgress;
+      onProgress(progress);
+    } catch {
+      // skip
+    }
+  }
 }
 
 export { type CrawlJobResponse, type ProjectListItem, type PaginatedProjects, type AssetItem, type PageItem };

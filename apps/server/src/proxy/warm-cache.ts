@@ -4,9 +4,8 @@ import { join, dirname } from 'path';
 import { createHash } from 'crypto';
 
 const CACHE_DIR = './proxy-cache';
-const TARGET = 'https://lusion.co';
 const PROXY_URL = 'http://localhost:3002';
-const MAX_DEPTH = 5;
+const DEFAULT_MAX_DEPTH = 5;
 const PAGE_LOAD_WAIT = 12000; // Wait for 3D/WebGL assets
 const SCROLL_WAIT = 3000;
 const DELAY_BETWEEN_PAGES = 2000;
@@ -18,6 +17,15 @@ interface QueueItem {
   parentUrl: string | null;
 }
 
+export interface CrawlSiteProgress {
+  visited: number;
+  queued: number;
+  currentUrl: string;
+  depth: number;
+}
+
+export type CrawlSiteCallback = (progress: CrawlSiteProgress) => void;
+
 function getCachePath(urlPath: string): string {
   let safePath = urlPath.replace(/[?#].*$/, '');
   if (safePath.endsWith('/') || safePath === '') safePath += 'index.html';
@@ -26,8 +34,8 @@ function getCachePath(urlPath: string): string {
   return join(CACHE_DIR, safePath);
 }
 
-function getQueryCachePath(fullUrl: string): string | null {
-  const parsed = new URL(fullUrl, TARGET);
+function getQueryCachePath(fullUrl: string, target: string): string | null {
+  const parsed = new URL(fullUrl, target);
   if (!parsed.search) return null;
   const hash = createHash('md5').update(fullUrl).digest('hex').slice(0, 12);
   const base = getCachePath(parsed.pathname);
@@ -51,10 +59,10 @@ function normalizeUrl(url: string): string {
   }
 }
 
-function isInternalUrl(url: string): boolean {
+function isInternalUrl(url: string, targetHostname: string): boolean {
   try {
     const parsed = new URL(url);
-    return parsed.hostname === 'lusion.co' || parsed.hostname === 'www.lusion.co';
+    return parsed.hostname === targetHostname || parsed.hostname.endsWith('.' + targetHostname);
   } catch {
     return false;
   }
@@ -69,15 +77,15 @@ function shouldSkipUrl(url: string): boolean {
   return skip.some(s => url.includes(s));
 }
 
-async function extractLinks(page: Page): Promise<string[]> {
-  return page.evaluate((base: string) => {
+async function extractLinks(page: Page, target: string, targetHostname: string): Promise<string[]> {
+  return page.evaluate(({ base, hostname }: { base: string; hostname: string }) => {
     const links: string[] = [];
     document.querySelectorAll('a[href]').forEach(el => {
       const href = el.getAttribute('href');
       if (!href) return;
       try {
         const url = new URL(href, base);
-        if (url.hostname === 'lusion.co' || url.hostname === 'www.lusion.co') {
+        if (url.hostname === hostname || url.hostname.endsWith('.' + hostname)) {
           links.push(url.href);
         }
       } catch {
@@ -85,13 +93,16 @@ async function extractLinks(page: Page): Promise<string[]> {
       }
     });
     return [...new Set(links)];
-  }, TARGET);
+  }, { base: target, hostname: targetHostname });
 }
 
 async function cachePageThroughProxy(
   context: BrowserContext,
   url: string,
   depth: number,
+  target: string,
+  targetHostname: string,
+  proxyUrl: string,
 ): Promise<string[]> {
   const page = await context.newPage();
   const discoveredLinks: string[] = [];
@@ -100,18 +111,18 @@ async function cachePageThroughProxy(
   // Count cached assets
   page.on('response', (response) => {
     const resUrl = response.url();
-    if (resUrl.startsWith(PROXY_URL)) {
+    if (resUrl.startsWith(proxyUrl)) {
       assetCount++;
     }
   });
 
   try {
     // Navigate through proxy (rewrite URL to go through localhost:3002)
-    const proxyUrl = url.replace(TARGET, PROXY_URL);
+    const proxyPageUrl = url.replace(target, proxyUrl);
     console.log(`\n  [D${depth}] ${url}`);
-    console.log(`         -> ${proxyUrl}`);
+    console.log(`         -> ${proxyPageUrl}`);
 
-    await page.goto(proxyUrl, {
+    await page.goto(proxyPageUrl, {
       waitUntil: 'load',
       timeout: PAGE_TIMEOUT,
     });
@@ -135,9 +146,9 @@ async function cachePageThroughProxy(
     await page.waitForTimeout(1000);
 
     // Extract all internal links for BFS
-    const links = await extractLinks(page);
+    const links = await extractLinks(page, target, targetHostname);
     for (const link of links) {
-      if (!shouldSkipUrl(link) && isInternalUrl(link)) {
+      if (!shouldSkipUrl(link) && isInternalUrl(link, targetHostname)) {
         discoveredLinks.push(normalizeUrl(link));
       }
     }
@@ -152,22 +163,38 @@ async function cachePageThroughProxy(
   return discoveredLinks;
 }
 
-async function warmCacheBFS() {
+/**
+ * Crawl a site using BFS through a caching proxy.
+ * @param targetUrl - The URL of the site to crawl (e.g. 'https://example.com')
+ * @param maxDepth - Maximum BFS depth
+ * @param onProgress - Optional progress callback
+ * @param proxyUrl - URL of the caching proxy (defaults to http://localhost:3002)
+ */
+export async function crawlSite(
+  targetUrl: string,
+  maxDepth: number = DEFAULT_MAX_DEPTH,
+  onProgress?: CrawlSiteCallback,
+  proxyUrl: string = PROXY_URL,
+): Promise<{ totalPages: number; totalErrors: number }> {
+  const target = targetUrl.replace(/\/+$/, '');
+  const targetHostname = new URL(target).hostname;
+
   console.log('='.repeat(60));
-  console.log('  Lusion.co Full Crawler (BFS to depth ' + MAX_DEPTH + ')');
-  console.log('  Proxy: ' + PROXY_URL);
+  console.log('  Site Crawler (BFS to depth ' + maxDepth + ')');
+  console.log('  Target: ' + target);
+  console.log('  Proxy: ' + proxyUrl);
   console.log('  Cache: ' + CACHE_DIR);
   console.log('='.repeat(60));
 
   // Check proxy is running
   try {
-    const check = await fetch(`${PROXY_URL}/__proxy__/stats`);
+    const check = await fetch(`${proxyUrl}/__proxy__/stats`);
     if (!check.ok) throw new Error('Proxy not responding');
     console.log('\n  Proxy is running\n');
   } catch {
-    console.error('\n  ERROR: Proxy is not running on ' + PROXY_URL);
-    console.error('  Start it first: npx tsx src/proxy/cache-proxy.ts\n');
-    process.exit(1);
+    console.error('\n  ERROR: Proxy is not running on ' + proxyUrl);
+    console.error('  Start it first or use the integrated server.\n');
+    throw new Error('Proxy is not running on ' + proxyUrl);
   }
 
   const browser = await chromium.launch({
@@ -189,10 +216,9 @@ async function warmCacheBFS() {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
   });
 
-  // BFS queue
+  // BFS queue — start with the root URL
   const queue: QueueItem[] = [
-    { url: `${TARGET}/`, depth: 0, parentUrl: null },
-    { url: `${TARGET}/projects`, depth: 0, parentUrl: null },
+    { url: `${target}/`, depth: 0, parentUrl: null },
   ];
   const visited = new Set<string>();
   let totalPages = 0;
@@ -204,17 +230,26 @@ async function warmCacheBFS() {
     const normalized = normalizeUrl(item.url);
 
     if (visited.has(normalized)) continue;
-    if (item.depth > MAX_DEPTH) continue;
+    if (item.depth > maxDepth) continue;
 
     visited.add(normalized);
     totalPages++;
     depthStats[item.depth] = (depthStats[item.depth] || 0) + 1;
 
+    if (onProgress) {
+      onProgress({
+        visited: totalPages,
+        queued: queue.length,
+        currentUrl: normalized,
+        depth: item.depth,
+      });
+    }
+
     try {
-      const links = await cachePageThroughProxy(context, normalized, item.depth);
+      const links = await cachePageThroughProxy(context, normalized, item.depth, target, targetHostname, proxyUrl);
 
       // Add discovered links to queue at depth + 1
-      if (item.depth < MAX_DEPTH) {
+      if (item.depth < maxDepth) {
         for (const link of links) {
           if (!visited.has(normalizeUrl(link))) {
             queue.push({
@@ -250,20 +285,19 @@ async function warmCacheBFS() {
     console.log(`    Depth ${d}: ${count} pages`);
   }
 
-  // Calculate cache size
-  const { execSync } = await import('child_process');
-  try {
-    const size = execSync(`du -sh ${CACHE_DIR} 2>/dev/null || dir /s ${CACHE_DIR} 2>nul`).toString().trim();
-    console.log(`  Cache size: ${size}`);
-  } catch {
-    console.log(`  Cache dir: ${CACHE_DIR}`);
-  }
+  console.log(`\n  All pages cached! Served via the proxy.`);
 
-  console.log(`\n  All pages cached! Open http://localhost:3002/ in Chrome`);
-  console.log(`  Works offline after caching.\n`);
+  return { totalPages, totalErrors };
 }
 
-warmCacheBFS().catch((err) => {
-  console.error('Crawler failed:', err);
-  process.exit(1);
-});
+// Allow running as standalone script: npx tsx src/proxy/warm-cache.ts <url> [maxDepth]
+const isMainModule = process.argv[1]?.replace(/\\/g, '/').includes('warm-cache');
+if (isMainModule) {
+  const targetArg = process.argv[2] || 'https://lusion.co';
+  const depthArg = parseInt(process.argv[3] || String(DEFAULT_MAX_DEPTH), 10);
+
+  crawlSite(targetArg, depthArg).catch((err) => {
+    console.error('Crawler failed:', err);
+    process.exit(1);
+  });
+}

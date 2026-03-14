@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Lusion Crawler",
-  description: "Web crawler for lusion.co projects",
+  title: "Web Crawler",
+  description: "Universal web crawler with BFS traversal and caching proxy",
 };
 
 export default function RootLayout({

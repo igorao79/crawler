@@ -4,6 +4,7 @@ export type CrawlStatus = 'pending' | 'running' | 'done' | 'error';
 
 export interface CrawlJob {
   id: string;
+  url: string;
   status: CrawlStatus;
   startedAt: string | null;
   finishedAt: string | null;
@@ -14,6 +15,7 @@ export interface CrawlJob {
 }
 
 export interface CreateCrawlJobRequest {
+  url: string;
   maxDepth?: number;
 }
 
@@ -128,6 +130,13 @@ export function isPageStatus(value: unknown): value is PageStatus {
 export function isCreateCrawlJobRequest(value: unknown): value is CreateCrawlJobRequest {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
+  if (typeof obj.url !== 'string' || !obj.url) return false;
+  try {
+    const parsed = new URL(obj.url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  } catch {
+    return false;
+  }
   if (obj.maxDepth !== undefined) {
     return typeof obj.maxDepth === 'number' && obj.maxDepth >= 1 && obj.maxDepth <= 5;
   }

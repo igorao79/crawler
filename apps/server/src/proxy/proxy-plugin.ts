@@ -4,7 +4,18 @@ import { join, dirname } from 'path';
 import { createHash } from 'crypto';
 
 const CACHE_DIR = './proxy-cache';
-const TARGET = 'https://lusion.co';
+
+// Dynamic target — set when a crawl starts, cleared when done
+let currentTarget: string | null = null;
+
+export function setProxyTarget(target: string | null): void {
+  currentTarget = target;
+  console.log(`[Proxy] Target set to: ${target ?? '(none)'}`);
+}
+
+export function getProxyTarget(): string | null {
+  return currentTarget;
+}
 
 // Ensure cache dir exists
 if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
@@ -17,8 +28,8 @@ function getCachePath(urlPath: string): string {
   return join(CACHE_DIR, safePath);
 }
 
-function getQueryCachePath(fullUrl: string): string | null {
-  const parsed = new URL(fullUrl, TARGET);
+function getQueryCachePath(fullUrl: string, target: string): string | null {
+  const parsed = new URL(fullUrl, target);
   if (!parsed.search) return null;
   const hash = createHash('md5').update(fullUrl).digest('hex').slice(0, 12);
   const base = getCachePath(parsed.pathname);
@@ -41,24 +52,11 @@ interface CacheMeta {
 
 function rewriteHtml(html: string): string {
   html = html.replace(/<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
-  html = stripLusionBranding(html);
   return html;
 }
 
 function rewriteJs(js: string): string {
-  return stripLusionBranding(js);
-}
-
-function stripLusionBranding(code: string): string {
-  // Replace with void 0 (not empty string) to avoid syntax errors in comma expressions
-  // e.g. (console.clear(),console.log("Created by Lusion")) → (console.clear(),void 0)
-  code = code.replace(/console\.log\s*\([^)]*[Cc]reated\s+by\s+Lusion[^)]*\)/g, 'void 0');
-  code = code.replace(/console\.log\s*\([^)]*lusion\.co[^)]*\)/g, 'void 0');
-  code = code.replace(/console\.log\s*\([^)]*https?:\/\/lusion\.co[^)]*\)/g, 'void 0');
-  code = code.replace(/console\.log\s*\([^)]*["'`]Created by[^)]*Lusion[^)]*\)/g, 'void 0');
-  // Also neutralize console.clear that often accompanies the branding
-  code = code.replace(/console\.clear\s*\(\s*\)\s*&&\s*console\.clear\s*\(\s*\)\s*,\s*void 0/g, 'void 0');
-  return code;
+  return js;
 }
 
 /**
@@ -72,6 +70,11 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
     return reply.status(404).send({ error: 'Not Found', message: `Route ${request.method}:${url} not found` });
   }
 
+  const target = currentTarget;
+  if (!target) {
+    return reply.status(503).send({ error: 'No proxy target configured', message: 'Start a crawl first to set the proxy target.' });
+  }
+
   // CORS headers
   reply.header('Access-Control-Allow-Origin', '*');
   reply.header('Access-Control-Allow-Methods', '*');
@@ -82,14 +85,14 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
   }
 
   if (url === '/__proxy__/stats') {
-    return reply.send({ target: TARGET, cacheDir: CACHE_DIR, status: 'running' });
+    return reply.send({ target, cacheDir: CACHE_DIR, status: 'running' });
   }
 
-  const fullUrl = `${TARGET}${url}`;
+  const fullUrl = `${target}${url}`;
 
   // Check cache
   const cachePath = url.includes('?')
-    ? getQueryCachePath(fullUrl) || getCachePath(url)
+    ? getQueryCachePath(fullUrl, target) || getCachePath(url)
     : getCachePath(url);
   const metaPath = getMetaPath(cachePath);
 
@@ -122,7 +125,7 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': (request.headers['accept'] as string) || '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': TARGET + '/',
+        'Referer': target + '/',
       },
       redirect: 'follow',
       signal: AbortSignal.timeout(30000),
