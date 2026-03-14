@@ -335,10 +335,27 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
         const fullPath = join(dir, entry.name);
         const zipPath = zipPrefix ? `${zipPrefix}/${entry.name}` : entry.name;
         if (entry.isDirectory()) {
+          // Skip npm package directories (e.g. zone.js/dist/)
+          if (/^\w[\w.-]*\.\w+$/.test(entry.name) && !entry.name.startsWith('_')) continue;
           await walkAndAdd(fullPath, zipPath);
         } else if (!entry.name.endsWith('.meta.json')) {
           const ext = extname(entry.name).toLowerCase();
           const fileSize = statSync(fullPath).size;
+
+          // Skip files without extensions (likely SPA fallback pages like "Logartis", "summary_large_image")
+          if (!ext && entry.name !== 'LICENSE' && entry.name !== 'CNAME') continue;
+
+          // Skip npm package paths (e.g. zone.js/dist/) that were fetched as SPA fallback
+          const relPath = fullPath.substring(cacheDir.length).replace(/\\/g, '/');
+          if (/^\/?\w[\w.-]*\.\w+\//.test(relPath) && !/^\/?_/.test(relPath) && !/^\/?assets/i.test(relPath)) continue;
+
+          // Skip non-HTML files that are actually HTML (SPA fallback responses)
+          if (ext && ext !== '.html' && ext !== '.htm' && fileSize < 20_000) {
+            try {
+              const head = readFileSync(fullPath, 'utf-8').trimStart().substring(0, 50);
+              if (head.startsWith('<!DOCTYPE html') || head.startsWith('<html')) continue;
+            } catch { /* binary file, skip check */ }
+          }
           const isTextFile = PRETTIFY_EXTS.has(ext) || ext === '.json' || ext === '.webmanifest';
 
           // For text files: rewrite absolute domain URLs to relative

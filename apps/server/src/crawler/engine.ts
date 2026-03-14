@@ -660,6 +660,23 @@ export class Crawler {
     // Pattern for srcset-style paths: "path.jpg 640w,path2.jpg 1920w"
     const srcsetPattern = /([\w/._-]+\.(?:png|jpe?g|webp|gif|svg|avif))\s+\d+w/gi;
 
+    // Global collections: prefixes and bare filenames across ALL files
+    const globalPrefixes = new Set<string>();
+    const globalBareFilenames = new Set<string>();
+
+    // First pass: collect path prefixes from all JS files
+    for (const file of scanFiles) {
+      if (!file.endsWith('.js') && !file.endsWith('.mjs')) continue;
+      try {
+        const content = readFileSync(file, 'utf-8');
+        const concatPattern = /["'](\/[a-zA-Z0-9_/-]+\/)["']\s*\+/g;
+        let cm;
+        while ((cm = concatPattern.exec(content)) !== null) {
+          globalPrefixes.add(cm[1]);
+        }
+      } catch {}
+    }
+
     for (const file of scanFiles) {
       try {
         const content = readFileSync(file, 'utf-8');
@@ -698,12 +715,28 @@ export class Crawler {
               assetPath = fromRoot;
               if (existsSync(join(cacheDir, fromFile)) || !cleaned.includes('/')) {
                 assetPath = fromFile;
+                // Track bare filenames for cross-file prefix matching
+                if (!cleaned.includes('/')) {
+                  globalBareFilenames.add(cleaned);
+                }
               }
             }
 
             const cachePath = join(cacheDir, assetPath);
             if (!existsSync(cachePath) && !existsSync(cachePath + '/index.html')) {
               missingUrls.add(assetPath);
+            }
+          }
+        }
+
+        // Try bare filenames with ALL discovered path prefixes across files
+        // (e.g., '/videos/' found in file A + 'ponpon-mania.mp4' found in file B)
+        for (const prefix of globalPrefixes) {
+          for (const fname of globalBareFilenames) {
+            const prefixedPath = `${prefix}${fname}`;
+            const cachePath = join(cacheDir, prefixedPath);
+            if (!existsSync(cachePath)) {
+              missingUrls.add(prefixedPath);
             }
           }
         }
@@ -780,12 +813,8 @@ export class Crawler {
       const filename = p.split('/').pop() || '';
       if (filename.length < 3) return false;
       // Skip paths that look like npm package imports (e.g. zone.js/dist/...)
-      if (/^\/?\w[\w.-]*\//.test(p) && !p.startsWith('/assets') && !p.startsWith('/static') && !p.startsWith('/media') && !p.startsWith('/img') && !p.startsWith('/css') && !p.startsWith('/js') && !p.startsWith('/fonts') && !p.startsWith('/images') && !p.startsWith('/public')) {
-        // Allow if it looks like a real site path (starts with known asset dirs or has multiple segments)
-        const segments = p.split('/').filter(Boolean);
-        // If first segment contains a dot and looks like a package name, skip
-        if (segments[0] && segments[0].includes('.') && !segments[0].startsWith('_') && segments.length > 1) return false;
-      }
+      const segments = p.split('/').filter(Boolean);
+      if (segments[0] && segments[0].includes('.') && !segments[0].startsWith('_') && segments.length > 1) return false;
       // Skip Angular internal decorators (ɵdir, ɵinj, etc. -> u0275dir.js, u0275inj.js)
       if (/u0275\w+\.js$/.test(filename)) return false;
       // Skip bare filenames without any directory that don't look like real assets
@@ -803,18 +832,27 @@ export class Crawler {
     if (filtered.length > 0) {
       const toDownload = filtered;
       console.log(`[Crawler] Downloading ${toDownload.length} missing assets...`);
-      this.emitProgress(0, 0, `Downloading ${toDownload.length} missing assets...`, 'running');
+      let assetsDone = 0;
+      const assetsTotal = toDownload.length;
 
-      // Download in parallel batches of 10
+      // Separate media (large) and other (small) assets for different batch sizes
+      const MEDIA_EXTS = new Set(['.mp4', '.webm', '.mp3', '.ogg', '.wav', '.glb', '.gltf', '.obj', '.fbx', '.hdr']);
+      const mediaFiles = toDownload.filter(p => MEDIA_EXTS.has(p.substring(p.lastIndexOf('.')).toLowerCase()));
+      const otherFiles = toDownload.filter(p => !MEDIA_EXTS.has(p.substring(p.lastIndexOf('.')).toLowerCase()));
+      // Download small assets first (batch of 10), then media (batch of 3)
+      const orderedFiles = [...otherFiles, ...mediaFiles];
       const BATCH_SIZE = 10;
-      for (let i = 0; i < toDownload.length; i += BATCH_SIZE) {
+      for (let i = 0; i < orderedFiles.length; i += (i >= otherFiles.length ? 3 : BATCH_SIZE)) {
         if (this.aborted) break;
-        const batch = toDownload.slice(i, i + BATCH_SIZE);
+        const currentBatch = i >= otherFiles.length ? 3 : BATCH_SIZE;
+        const batch = orderedFiles.slice(i, i + currentBatch);
         const results = await Promise.allSettled(
           batch.map(async (assetPath) => {
             const cachePath = join(cacheDir, assetPath);
             const url = `https://${this.targetHostname}${assetPath}`;
-            const response = await context.request.get(url, { timeout: 5000 });
+            const ext = assetPath.substring(assetPath.lastIndexOf('.')).toLowerCase();
+            const timeout = MEDIA_EXTS.has(ext) ? 30000 : 5000;
+            const response = await context.request.get(url, { timeout });
             if (response.ok()) {
               // Reject HTML responses — they're error/redirect pages, not real assets
               const ct = response.headers()['content-type'] || '';
@@ -830,6 +868,8 @@ export class Crawler {
           })
         );
         downloaded += results.filter(r => r.status === 'fulfilled' && r.value).length;
+        assetsDone += batch.length;
+        this.emitProgress(assetsDone, assetsTotal, `Downloading assets... (${assetsDone}/${assetsTotal})`, 'running');
       }
     }
 
