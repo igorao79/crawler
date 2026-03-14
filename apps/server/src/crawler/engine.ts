@@ -1,4 +1,6 @@
 import { chromium, Browser, Page } from 'playwright';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { join, dirname } from 'path';
 import { setProxyCookies } from '../proxy/proxy-plugin.js';
 import { v4 as uuidv4 } from 'uuid';
 import { eq } from 'drizzle-orm';
@@ -244,21 +246,45 @@ export class Crawler {
         Object.defineProperty(navigator, 'webdriver', { get: () => false });
       });
       const networkAssets: NetworkAsset[] = [];
+      const cacheDir = join('./proxy-cache', this.targetHostname);
+      if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
 
-      // Intercept all network responses to capture loaded resources
-      page.on('response', (response) => {
+      // Intercept all network responses — save to cache directly from browser
+      page.on('response', async (response) => {
         const resUrl = response.url();
         const contentType = response.headers()['content-type'] ?? '';
         const status = response.status();
-        if (status >= 200 && status < 400 && isAssetUrl(resUrl, contentType)) {
-          networkAssets.push({ url: resUrl, contentType, status });
+        if (status >= 200 && status < 400) {
+          // Cache the response body to disk
+          try {
+            const parsed = new URL(resUrl);
+            if (parsed.hostname === this.targetHostname || parsed.hostname.endsWith('.' + this.targetHostname)) {
+              let safePath = parsed.pathname.replace(/[?#].*$/, '');
+              if (safePath.endsWith('/') || safePath === '') safePath += 'index.html';
+              const lastSeg = safePath.split('/').pop() || '';
+              if (!lastSeg.includes('.')) safePath += '/index.html';
+              const cachePath = join(cacheDir, safePath);
+              const cacheFileDir = dirname(cachePath);
+              if (!existsSync(cacheFileDir)) mkdirSync(cacheFileDir, { recursive: true });
+              const body = await response.body().catch(() => null);
+              if (body && !existsSync(cachePath)) {
+                writeFileSync(cachePath, body);
+                // Save meta
+                const meta = { contentType, status, url: resUrl, cachedAt: new Date().toISOString() };
+                writeFileSync(cachePath + '.meta.json', JSON.stringify(meta, null, 2));
+              }
+            }
+          } catch { /* ignore cache errors */ }
+
+          if (isAssetUrl(resUrl, contentType)) {
+            networkAssets.push({ url: resUrl, contentType, status });
+          }
         }
       });
 
       try {
-        // Navigate through proxy so assets get cached with original structure
-        const proxyPageUrl = url.replace(new URL(url).origin, PROXY_URL);
-        await page.goto(proxyPageUrl, {
+        // Navigate directly to the URL (browser has cookies/sessions)
+        await page.goto(url, {
           waitUntil: 'load',
           timeout: PAGE_TIMEOUT,
         });
