@@ -147,6 +147,7 @@ export class Crawler {
       this.emitProgress(parsedCount, parsedCount, '', this.aborted ? 'error' : 'done');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      this.emitProgress(0, 0, errorMessage, 'error');
       await this.db
         .update(schema.crawlJobs)
         .set({
