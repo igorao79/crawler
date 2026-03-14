@@ -227,8 +227,8 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'invalid filename' });
     }
 
-    if (!process.env.GROQ_API_KEY) {
-      return reply.status(500).send({ error: 'GROQ_API_KEY not configured on the server' });
+    if (!process.env.GEMINI_API_KEY && !process.env.CEREBRAS_API_KEY && !process.env.GROQ_API_KEY) {
+      return reply.status(500).send({ error: 'Set GEMINI_API_KEY, CEREBRAS_API_KEY, or GROQ_API_KEY' });
     }
 
     // Stream progress as newline-delimited JSON
