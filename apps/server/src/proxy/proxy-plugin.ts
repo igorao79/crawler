@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { createHash } from 'crypto';
 
-const CACHE_DIR = './proxy-cache';
+const BASE_CACHE_DIR = './proxy-cache';
 
 // Dynamic target — set when a crawl starts, cleared when done
 let currentTarget: string | null = null;
@@ -17,15 +17,29 @@ export function getProxyTarget(): string | null {
   return currentTarget;
 }
 
-// Ensure cache dir exists
-if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
+/** Returns the domain-specific cache directory for the current target */
+function getCacheDir(): string {
+  if (!currentTarget) return BASE_CACHE_DIR;
+  const hostname = new URL(currentTarget).hostname;
+  return join(BASE_CACHE_DIR, hostname);
+}
+
+/** Returns the domain-specific cache directory for a given domain */
+export function getCacheDirForDomain(domain: string): string {
+  return join(BASE_CACHE_DIR, domain);
+}
+
+// Ensure base cache dir exists
+if (!existsSync(BASE_CACHE_DIR)) mkdirSync(BASE_CACHE_DIR, { recursive: true });
 
 function getCachePath(urlPath: string): string {
+  const cacheDir = getCacheDir();
+  if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
   let safePath = urlPath.replace(/[?#].*$/, '');
   if (safePath.endsWith('/') || safePath === '') safePath += 'index.html';
   const lastSegment = safePath.split('/').pop() || '';
   if (!lastSegment.includes('.')) safePath += '/index.html';
-  return join(CACHE_DIR, safePath);
+  return join(cacheDir, safePath);
 }
 
 function getQueryCachePath(fullUrl: string, target: string): string | null {
@@ -85,7 +99,7 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
   }
 
   if (url === '/__proxy__/stats') {
-    return reply.send({ target, cacheDir: CACHE_DIR, status: 'running' });
+    return reply.send({ target, cacheDir: getCacheDir(), status: 'running' });
   }
 
   const fullUrl = `${target}${url}`;

@@ -1,8 +1,6 @@
 import { chromium, Browser, Page } from 'playwright';
 import { v4 as uuidv4 } from 'uuid';
 import { eq } from 'drizzle-orm';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join, basename } from 'path';
 import { CrawlQueue } from './queue.js';
 import { extractPageData, type ExtractedData } from './extractor.js';
 import { collectAssets, deduplicateAssets, classifyAssetUrl } from './asset-collector.js';
@@ -10,11 +8,13 @@ import type { DrizzleDB } from '../db/client.js';
 import * as schema from '../db/schema.js';
 import type { CrawlProgress, CrawlStatus } from '@lusion-crawler/shared';
 
-const DELAY_MS = 1500; // Delay between requests to be polite
-const PAGE_TIMEOUT = 60000;
-const MAX_RETRIES = 3;
-const JS_RENDER_WAIT = 8000; // Extra wait for JS/WebGL rendering
+const DELAY_MS = 300; // Short delay between requests
+const PAGE_TIMEOUT = 30000;
+const MAX_RETRIES = 2;
+const JS_RENDER_WAIT = 2000; // Reduced - most content loads in 2s
 const OUTPUT_DIR = './output';
+const PROXY_URL = 'http://localhost:3001'; // Route through proxy for caching
+const CONCURRENCY = 3; // Parse 3 pages in parallel
 
 export type ProgressCallback = (progress: CrawlProgress) => void;
 
@@ -79,51 +79,68 @@ export class Crawler {
         queue.add(url, 1);
       }
 
-      // Step 2: Parse each project (BFS)
+      // Step 2: Parse pages in parallel (BFS)
       let parsedCount = 0;
 
       while (!queue.isEmpty() && !this.aborted) {
-        const item = queue.next();
-        if (!item) break;
+        // Grab up to CONCURRENCY items from the queue
+        const batch: Array<{ url: string; depth: number; parentUrl: string | null }> = [];
+        for (let i = 0; i < CONCURRENCY && !queue.isEmpty(); i++) {
+          const item = queue.next();
+          if (item) batch.push(item);
+        }
+        if (batch.length === 0) break;
 
-        try {
-          const parsed = await this.parsePage(item.url);
-          const { data, networkAssets, screenshot, mhtml } = parsed;
-          const slug = this.extractSlug(item.url);
+        // Parse all pages in the batch concurrently
+        const results = await Promise.allSettled(
+          batch.map(async (item) => {
+            const parsed = await this.parsePage(item.url);
+            return { item, parsed };
+          })
+        );
 
-          if (item.depth === 1 && slug) {
-            // It's a project page
-            const projectId = uuidv4();
-            await this.saveProject(projectId, slug, item.url, data);
-            await this.saveAssets(projectId, data, networkAssets);
-            // Download all assets + screenshot + MHTML to local folder
-            await this.downloadProjectAssets(slug, data, networkAssets, screenshot, mhtml);
-          } else {
-            // It's a sub-page
-            await this.savePage(item.url, item.depth, item.parentUrl, data);
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            console.error(`Error parsing page:`, result.reason);
+            continue;
           }
 
-          // Add internal links to queue (depth + 1)
-          for (const link of data.internalLinks) {
-            queue.add(link, item.depth + 1, item.url);
+          const { item, parsed } = result.value;
+          const { data, networkAssets } = parsed;
+
+          try {
+            const slug = this.extractSlug(item.url);
+            if (item.depth === 1 && slug) {
+              const projectId = uuidv4();
+              await this.saveProject(projectId, slug, item.url, data);
+              await this.saveAssets(projectId, data, networkAssets);
+            } else {
+              await this.savePage(item.url, item.depth, item.parentUrl, data);
+            }
+
+            // Add internal links to queue (depth + 1)
+            for (const link of data.internalLinks) {
+              queue.add(link, item.depth + 1, item.url);
+            }
+          } catch (err) {
+            console.error(`Error saving ${item.url}:`, err);
           }
 
           parsedCount++;
-          await this.db
-            .update(schema.crawlJobs)
-            .set({
-              parsedPages: parsedCount,
-              totalPages: parsedCount + queue.size(),
-            })
-            .where(eq(schema.crawlJobs.id, this.jobId));
-
-          this.emitProgress(parsedCount, parsedCount + queue.size(), item.url, 'running');
-        } catch (err) {
-          console.error(`Error parsing ${item.url}:`, err);
         }
 
-        // Polite delay
-        await this.delay(DELAY_MS);
+        await this.db
+          .update(schema.crawlJobs)
+          .set({
+            parsedPages: parsedCount,
+            totalPages: parsedCount + queue.size(),
+          })
+          .where(eq(schema.crawlJobs.id, this.jobId));
+
+        this.emitProgress(parsedCount, parsedCount + queue.size(), batch[batch.length - 1].url, 'running');
+
+        // Short delay between batches
+        if (!queue.isEmpty()) await this.delay(DELAY_MS);
       }
 
       await this.updateJobStatus(this.aborted ? 'error' : 'done');
@@ -220,30 +237,18 @@ export class Crawler {
       });
 
       try {
-        await page.goto(url, {
+        // Navigate through proxy so assets get cached with original structure
+        const proxyPageUrl = url.replace(new URL(url).origin, PROXY_URL);
+        await page.goto(proxyPageUrl, {
           waitUntil: 'load',
           timeout: PAGE_TIMEOUT,
         });
-        // Wait extra time for JS to render (WebGL, 3D, dynamic content)
+        // Wait for JS to render dynamic content
         await this.delay(JS_RENDER_WAIT);
 
         const data = await extractPageData(page, url);
 
-        // Take full-page screenshot of the rendered page
-        const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-
-        // Save MHTML snapshot via CDP (captures rendered page with all inline resources)
-        let mhtml: string | null = null;
-        try {
-          const cdp = await page.context().newCDPSession(page);
-          const { data: mhtmlData } = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
-          mhtml = mhtmlData;
-          await cdp.detach();
-        } catch (err) {
-          console.warn(`[Crawler] MHTML capture failed for ${url}:`, err instanceof Error ? err.message : err);
-        }
-
-        return { data, networkAssets, screenshot, mhtml };
+        return { data, networkAssets };
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         console.warn(`Retry ${attempt + 1}/${MAX_RETRIES} for ${url}: ${lastError.message}`);
@@ -308,133 +313,6 @@ export class Crawler {
     console.log(`[Crawler] Saved ${collected.length} assets for project ${projectId}`);
   }
 
-  private async downloadProjectAssets(
-    slug: string,
-    data: ExtractedData,
-    networkAssets: NetworkAsset[],
-    screenshot: Buffer,
-    mhtml: string | null,
-  ): Promise<void> {
-    const projectDir = join(OUTPUT_DIR, slug);
-    const assetsDir = join(projectDir, 'assets');
-    const cssDir = join(projectDir, 'css');
-    const jsDir = join(projectDir, 'js');
-
-    // Create directories
-    for (const dir of [projectDir, assetsDir, cssDir, jsDir]) {
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    }
-
-    // Save screenshot (this is the actual rendered page!)
-    writeFileSync(join(projectDir, 'screenshot.png'), screenshot);
-    console.log(`[Crawler] Saved screenshot for ${slug} (${(screenshot.length / 1024).toFixed(0)} KB)`);
-
-    // Save MHTML snapshot (can be opened in Chrome to see the full rendered page)
-    if (mhtml) {
-      writeFileSync(join(projectDir, 'snapshot.mhtml'), mhtml, 'utf-8');
-      console.log(`[Crawler] Saved MHTML snapshot for ${slug}`);
-    }
-
-    // Collect all asset URLs
-    const allAssetUrls = new Set<string>([
-      ...data.stylesheets,
-      ...data.scripts,
-      ...data.imageUrls,
-      ...data.videoUrls,
-      ...data.model3dUrls,
-      ...networkAssets.map((a) => a.url),
-    ]);
-
-    // Download all assets and build URL -> local path map
-    const urlToLocalPath = new Map<string, string>();
-    let downloaded = 0;
-    let failed = 0;
-
-    for (const url of allAssetUrls) {
-      try {
-        const type = classifyAssetUrl(url);
-        let targetSubdir = 'assets';
-        let targetDir = assetsDir;
-        if (type === 'stylesheet') { targetDir = cssDir; targetSubdir = 'css'; }
-        else if (type === 'script') { targetDir = jsDir; targetSubdir = 'js'; }
-
-        const filename = sanitizeFilename(url);
-        const filePath = join(targetDir, filename);
-        const relativePath = `${targetSubdir}/${filename}`;
-
-        const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
-        if (!response.ok) {
-          failed++;
-          continue;
-        }
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        writeFileSync(filePath, buffer);
-        urlToLocalPath.set(url, relativePath);
-
-        // Update asset record with file path
-        await this.db
-          .update(schema.assets)
-          .set({ filePath, sizeBytes: buffer.length })
-          .where(eq(schema.assets.url, url));
-
-        downloaded++;
-      } catch {
-        failed++;
-      }
-    }
-
-    // Rewrite HTML: replace absolute/remote URLs with local relative paths
-    let localHtml = data.fullHtml;
-
-    // Remove <base href="/"> — it breaks relative paths when served locally
-    localHtml = localHtml.replace(/<base\s+href="[^"]*"\s*\/?>/gi, '');
-
-    for (const [originalUrl, localPath] of urlToLocalPath) {
-      // Replace full URLs (https://example.com/...)
-      localHtml = localHtml.split(originalUrl).join(localPath);
-
-      // Also replace path-only references (/_astro/..., /assets/...)
-      try {
-        const parsed = new URL(originalUrl);
-        if (parsed.hostname === this.targetHostname || parsed.hostname.endsWith('.' + this.targetHostname)) {
-          localHtml = localHtml.split(parsed.pathname).join(localPath);
-        }
-      } catch {
-        // skip
-      }
-    }
-
-    // Replace any remaining absolute paths to the target with relative
-    const targetOrigin = new URL(this.targetUrl).origin;
-    const escapedOrigin = targetOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    localHtml = localHtml.replace(new RegExp(escapedOrigin + '/', 'g'), '');
-
-    // Save rewritten HTML
-    writeFileSync(join(projectDir, 'index.html'), localHtml, 'utf-8');
-
-    // Save original HTML too
-    writeFileSync(join(projectDir, 'original.html'), data.fullHtml, 'utf-8');
-
-    // Save metadata
-    const metadata = {
-      title: data.title,
-      description: data.description,
-      tags: data.tags,
-      scripts: data.scripts,
-      stylesheets: data.stylesheets,
-      imageUrls: data.imageUrls,
-      videoUrls: data.videoUrls,
-      model3dUrls: data.model3dUrls,
-      networkAssetsCount: networkAssets.length,
-      downloadedAssets: downloaded,
-      failedAssets: failed,
-      urlMap: Object.fromEntries(urlToLocalPath),
-    };
-    writeFileSync(join(projectDir, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf-8');
-
-    console.log(`[Crawler] Downloaded ${downloaded} assets for ${slug} (${failed} failed)`);
-  }
 
   private async savePage(
     url: string,
@@ -507,8 +385,6 @@ export class Crawler {
 interface ParsedPage {
   data: ExtractedData;
   networkAssets: NetworkAsset[];
-  screenshot: Buffer;
-  mhtml: string | null;
 }
 
 interface NetworkAsset {
@@ -540,25 +416,3 @@ function isAssetUrl(url: string, contentType: string): boolean {
   }
 }
 
-function sanitizeFilename(url: string): string {
-  try {
-    const parsed = new URL(url);
-    let name = basename(parsed.pathname);
-    // Add hash of full URL to avoid collisions
-    const hash = Buffer.from(url).toString('base64url').slice(-8);
-    if (!name || name === '/') {
-      name = hash;
-    } else {
-      const dotIdx = name.lastIndexOf('.');
-      if (dotIdx > 0) {
-        name = name.slice(0, dotIdx) + '_' + hash + name.slice(dotIdx);
-      } else {
-        name = name + '_' + hash;
-      }
-    }
-    // Remove dangerous chars
-    return name.replace(/[<>:"/\\|?*]/g, '_').slice(0, 200);
-  } catch {
-    return Buffer.from(url).toString('base64url').slice(0, 50);
-  }
-}

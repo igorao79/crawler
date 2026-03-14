@@ -270,20 +270,21 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
     return reply;
   });
 
-  // GET /api/source/download-all — ZIP of full site with original structure + deobfuscated JS/CSS
-  // Accepts optional ?domain= query parameter for naming the ZIP
+  // GET /api/source/download-all — ZIP of crawled site from proxy-cache/{domain}/
+  // Uses proxy cache which preserves original site structure
   fastify.get<{ Querystring: { domain?: string } }>('/api/source/download-all', async (request, reply) => {
-    const PROXY_CACHE_DIR = './proxy-cache';
-
-    if (!existsSync(PROXY_CACHE_DIR)) {
-      return reply.status(404).send({ error: 'No cached site found. Run crawl first.' });
-    }
-
-    // Use domain from query or fall back to generic name
     const rawDomain = request.query.domain || 'site';
     const safeDomain = rawDomain.replace(/[^a-zA-Z0-9._-]/g, '_');
     const zipFolderName = `${safeDomain}-crawled`;
     const zipFileName = `${safeDomain}-site.zip`;
+
+    // Use domain-specific proxy cache (original site structure)
+    const { getCacheDirForDomain } = await import('../proxy/proxy-plugin.js');
+    const cacheDir = getCacheDirForDomain(rawDomain);
+
+    if (!existsSync(cacheDir)) {
+      return reply.status(404).send({ error: `No cached site found for ${rawDomain}. Run crawl first.` });
+    }
 
     reply.raw.writeHead(200, {
       'Content-Type': 'application/zip',
@@ -294,56 +295,47 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
     const archive = archiver('zip', { zlib: { level: 5 } });
     archive.pipe(reply.raw);
 
-    // Map of proxy-cache relative paths → deobfuscated readable-source paths
-    // Only CSS — JS deobfuscation breaks syntax (Prettier can't handle 1.7MB minified bundle)
-    const deobfuscatedMap: Record<string, string> = {};
-    if (existsSync(join(READABLE_SOURCE_DIR, 'css'))) {
-      for (const f of readdirSync(join(READABLE_SOURCE_DIR, 'css'))) {
-        if (f === 'design-tokens.css' || f === 'animations.css') continue;
-        const originalPath = f.replace(/^_astro_/, '_astro/');
-        deobfuscatedMap[originalPath] = join(READABLE_SOURCE_DIR, 'css', f);
-      }
-    }
-
-    // Walk entire proxy-cache with original structure
+    // Walk proxy-cache with original site structure
     const walkAndAdd = (dir: string, zipPrefix: string) => {
+      if (!existsSync(dir)) return;
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const fullPath = join(dir, entry.name);
         const zipPath = zipPrefix ? `${zipPrefix}/${entry.name}` : entry.name;
         if (entry.isDirectory()) {
           walkAndAdd(fullPath, zipPath);
         } else if (!entry.name.endsWith('.meta.json')) {
-          // Check if we have a deobfuscated version
-          const deobPath = deobfuscatedMap[zipPath];
-          if (deobPath && existsSync(deobPath)) {
-            archive.file(deobPath, { name: `${zipFolderName}/${zipPath}` });
-          } else {
-            archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
-          }
+          archive.file(fullPath, { name: `${zipFolderName}/${zipPath}` });
         }
       }
     };
 
-    walkAndAdd(PROXY_CACHE_DIR, '');
+    walkAndAdd(cacheDir, '');
 
-    // Also add extra deobfuscated files that don't replace originals
-    const extras = [
-      { src: join(READABLE_SOURCE_DIR, 'css', 'design-tokens.css'), dest: `${zipFolderName}/_extras/design-tokens.css` },
-      { src: join(READABLE_SOURCE_DIR, 'css', 'animations.css'), dest: `${zipFolderName}/_extras/animations.css` },
-      { src: join(READABLE_SOURCE_DIR, 'shaders', 'extracted-shaders.glsl'), dest: `${zipFolderName}/_extras/extracted-shaders.glsl` },
-      { src: join(READABLE_SOURCE_DIR, 'assets-index', 'ASSETS.md'), dest: `${zipFolderName}/_extras/ASSETS.md` },
-    ];
-    for (const { src, dest } of extras) {
-      if (existsSync(src)) archive.file(src, { name: dest });
-    }
+    // Find first HTML page for redirect (in case there's no root index.html)
+    let firstHtmlPath = '';
+    const findFirstHtml = (dir: string, prefix: string): boolean => {
+      if (!existsSync(dir)) return false;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          const sub = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (findFirstHtml(join(dir, entry.name), sub)) return true;
+        } else if (entry.name === 'index.html') {
+          firstHtmlPath = prefix ? `/${prefix}` : '/';
+          return true;
+        }
+      }
+      return false;
+    };
+    findFirstHtml(cacheDir, '');
 
-    // Add server.cjs for local serving (npx serve doesn't handle SPA routing)
+    // Add server.cjs for local serving
     archive.append(
       `const http = require("http");\n` +
       `const fs = require("fs");\n` +
       `const path = require("path");\n\n` +
-      `const PORT = process.env.PORT || 3000;\n` +
-      `const ROOT = __dirname;\n\n` +
+      `const PORT = process.env.PORT || 5555;\n` +
+      `const ROOT = __dirname;\n` +
+      `const FIRST_PAGE = "${firstHtmlPath || '/'}";\n\n` +
       `const MIME = {\n` +
       `  ".html": "text/html", ".css": "text/css", ".js": "application/javascript",\n` +
       `  ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg",\n` +
@@ -355,6 +347,12 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       `};\n\n` +
       `http.createServer((req, res) => {\n` +
       `  let url = decodeURIComponent(req.url.split("?")[0]);\n` +
+      `  // Redirect root to first available page\n` +
+      `  if (url === "/" && FIRST_PAGE !== "/") {\n` +
+      `    res.writeHead(302, { Location: FIRST_PAGE });\n` +
+      `    res.end();\n` +
+      `    return;\n` +
+      `  }\n` +
       `  let fp = path.join(ROOT, url);\n` +
       `  if (fs.existsSync(fp) && fs.statSync(fp).isDirectory()) fp = path.join(fp, "index.html");\n` +
       `  if (!fs.existsSync(fp) && !path.extname(fp)) {\n` +
@@ -365,24 +363,22 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       `  const ext = path.extname(fp).toLowerCase();\n` +
       `  res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", "Access-Control-Allow-Origin": "*" });\n` +
       `  fs.createReadStream(fp).pipe(res);\n` +
-      `}).listen(PORT, () => console.log("${safeDomain} site running at http://localhost:" + PORT));\n`,
+      `}).listen(PORT, () => console.log("${safeDomain} running at http://localhost:" + PORT));\n`,
       { name: `${zipFolderName}/server.cjs` }
     );
 
-    // Add a README with instructions
+    // Add README
     archive.append(
       `# ${rawDomain} — Crawled Site\n\n` +
       `## How to run locally\n\n` +
       `1. Extract this ZIP\n` +
       `2. Open terminal in the ${zipFolderName} folder\n` +
       `3. Run: node server.cjs\n` +
-      `4. Open http://localhost:3000 in your browser\n\n` +
-      `All navigation will work correctly.\n\n` +
+      `4. Open http://localhost:5555 in your browser\n\n` +
       `## What's inside\n\n` +
-      `- Full site with original file structure (HTML, CSS, JS, assets)\n` +
-      `- _extras/ folder may contain extracted design tokens, animations, and asset catalog\n\n` +
+      `- Full site with original file structure (HTML, CSS, JS, assets)\n\n` +
       `## Notes\n\n` +
-      `- Some external resources (CDN videos, third-party scripts) may not load offline\n` +
+      `- Some external resources (CDN, third-party scripts) may not load offline\n` +
       `- Requires Node.js installed\n`,
       { name: `${zipFolderName}/README.md` }
     );
