@@ -7,10 +7,16 @@ const BASE_CACHE_DIR = './proxy-cache';
 
 // Dynamic target — set when a crawl starts, cleared when done
 let currentTarget: string | null = null;
+// Cookies from browser session — used for authenticated asset fetches
+let browserCookies: string | null = null;
 
 export function setProxyTarget(target: string | null): void {
   currentTarget = target;
   console.log(`[Proxy] Target set to: ${target ?? '(none)'}`);
+}
+
+export function setProxyCookies(cookies: string | null): void {
+  browserCookies = cookies;
 }
 
 export function getProxyTarget(): string | null {
@@ -133,14 +139,18 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
   // Fetch from origin
   try {
     console.log(`[PROXY] FETCH ${fullUrl}`);
+    const fetchHeaders: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Accept': (request.headers['accept'] as string) || '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Referer': target + '/',
+    };
+    if (browserCookies) {
+      fetchHeaders['Cookie'] = browserCookies;
+    }
     const res = await fetch(fullUrl, {
       method: request.method as string,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': (request.headers['accept'] as string) || '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': target + '/',
-      },
+      headers: fetchHeaders,
       redirect: 'follow',
       signal: AbortSignal.timeout(30000),
     });

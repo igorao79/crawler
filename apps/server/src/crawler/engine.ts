@@ -1,4 +1,5 @@
 import { chromium, Browser, Page } from 'playwright';
+import { setProxyCookies } from '../proxy/proxy-plugin.js';
 import { v4 as uuidv4 } from 'uuid';
 import { eq } from 'drizzle-orm';
 import { CrawlQueue } from './queue.js';
@@ -166,6 +167,7 @@ export class Crawler {
         .where(eq(schema.crawlJobs.id, this.jobId));
       throw err;
     } finally {
+      setProxyCookies(null);
       if (this.browser) {
         await this.browser.close();
         this.browser = null;
@@ -195,6 +197,14 @@ export class Crawler {
       });
       // Wait for Cloudflare challenge to pass + page render
       await this.delay(5000);
+
+      // Extract cookies from browser and pass to proxy for authenticated fetches
+      const cookies = await page.context().cookies();
+      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+      if (cookieStr) {
+        setProxyCookies(cookieStr);
+        console.log(`[Crawler] Forwarding ${cookies.length} cookies to proxy`);
+      }
 
       const targetHostname = this.targetHostname;
       const urls = await page.evaluate(({ base, hostname }): string[] => {
