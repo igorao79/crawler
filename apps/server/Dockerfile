@@ -10,22 +10,19 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy package files for install
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY apps/server/package.json ./apps/server/
 COPY packages/shared/package.json ./packages/shared/
 
-RUN npm install --workspace=apps/server --workspace=packages/shared
+RUN npm ci --workspace=apps/server --workspace=packages/shared
 
 # Copy source
 COPY packages/shared/ ./packages/shared/
 COPY apps/server/ ./apps/server/
 
-# Build TypeScript
-RUN cd apps/server && npx tsc
-
 # Install Playwright chromium
-RUN cd apps/server && npx playwright install chromium
+RUN npx playwright install chromium
 
 EXPOSE 3001
 
-CMD ["node", "apps/server/dist/server.js"]
+CMD ["npx", "tsx", "apps/server/src/server.ts"]
