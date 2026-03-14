@@ -273,8 +273,9 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
 
   // GET /api/source/download-all — ZIP of crawled site from proxy-cache/{domain}/
   // Uses proxy cache which preserves original site structure
-  fastify.get<{ Querystring: { domain?: string } }>('/api/source/download-all', async (request, reply) => {
+  fastify.get<{ Querystring: { domain?: string; url?: string } }>('/api/source/download-all', async (request, reply) => {
     const rawDomain = request.query.domain || 'site';
+    const originalUrl = request.query.url || '';
     const safeDomain = rawDomain.replace(/[^a-zA-Z0-9._-]/g, '_');
     const zipFolderName = `${safeDomain}-crawled`;
     const zipFileName = `${safeDomain}-site.zip`;
@@ -314,7 +315,9 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
           await walkAndAdd(fullPath, zipPath);
         } else if (!entry.name.endsWith('.meta.json')) {
           const ext = extname(entry.name).toLowerCase();
-          if (PRETTIFY_EXTS.has(ext)) {
+          const fileSize = statSync(fullPath).size;
+          // Only prettify small files (<500KB) — large minified bundles crash Prettier
+          if (PRETTIFY_EXTS.has(ext) && fileSize < 512_000) {
             try {
               const raw = readFileSync(fullPath, 'utf-8');
               const formatted = await prettier.format(raw, {
@@ -337,22 +340,35 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
 
     await walkAndAdd(cacheDir, '');
 
-    // Find first HTML page for redirect (in case there's no root index.html)
-    let firstHtmlPath = '';
-    const findFirstHtml = (dir: string, prefix: string): boolean => {
-      if (!existsSync(dir)) return false;
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        if (entry.isDirectory()) {
-          const sub = prefix ? `${prefix}/${entry.name}` : entry.name;
-          if (findFirstHtml(join(dir, entry.name), sub)) return true;
-        } else if (entry.name === 'index.html') {
-          firstHtmlPath = prefix ? `/${prefix}` : '/';
-          return true;
+    // Determine first page from the original crawl URL
+    let firstHtmlPath = '/';
+    if (originalUrl) {
+      try {
+        const parsed = new URL(originalUrl);
+        firstHtmlPath = parsed.pathname || '/';
+        // For hash-based SPAs, strip hash but keep the path
+        if (parsed.hash && parsed.hash.length > 1) {
+          // Keep just the pathname — hash routes are client-side
         }
-      }
-      return false;
-    };
-    findFirstHtml(cacheDir, '');
+      } catch { /* use default */ }
+    }
+    // Fallback: find first index.html if no URL provided
+    if (firstHtmlPath === '/' && !originalUrl) {
+      const findFirstHtml = (dir: string, prefix: string): boolean => {
+        if (!existsSync(dir)) return false;
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            const sub = prefix ? `${prefix}/${entry.name}` : entry.name;
+            if (findFirstHtml(join(dir, entry.name), sub)) return true;
+          } else if (entry.name === 'index.html') {
+            firstHtmlPath = prefix ? `/${prefix}` : '/';
+            return true;
+          }
+        }
+        return false;
+      };
+      findFirstHtml(cacheDir, '');
+    }
 
     // Add server.cjs for local serving
     archive.append(
@@ -370,6 +386,8 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       `  ".ttf": "font/ttf", ".ogg": "audio/ogg", ".mp4": "video/mp4",\n` +
       `  ".webm": "video/webm", ".webp": "image/webp", ".buf": "application/octet-stream",\n` +
       `  ".exr": "application/octet-stream", ".webmanifest": "application/manifest+json",\n` +
+      `  ".ktx": "image/ktx", ".ktx2": "image/ktx2", ".gltf": "model/gltf+json",\n` +
+      `  ".glb": "model/gltf-binary", ".hdr": "application/octet-stream", ".basis": "application/octet-stream",\n` +
       `};\n\n` +
       `http.createServer((req, res) => {\n` +
       `  let url = decodeURIComponent(req.url.split("?")[0]);\n` +

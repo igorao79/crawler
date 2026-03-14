@@ -26,13 +26,9 @@ async function buildServer() {
   const db = getDatabase();
   fastify.decorate('db', db);
 
-  // CORS — allow configured origins or default to localhost
-  const allowedOrigins = process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim())
-    : ['http://localhost:3000', 'http://localhost:3001'];
-
+  // CORS — allow all origins (needed for ngrok/Vercel/etc)
   await fastify.register(cors, {
-    origin: allowedOrigins,
+    origin: true,
     methods: ['GET', 'POST', 'DELETE', 'PUT', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,

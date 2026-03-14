@@ -1,5 +1,5 @@
 import { chromium, Browser, Page } from 'playwright';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, readdirSync, statSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { setProxyCookies } from '../proxy/proxy-plugin.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -26,6 +26,7 @@ export class Crawler {
   private jobId: string;
   private targetUrl: string;
   private targetHostname: string;
+  private targetPathPrefix: string;
   private maxDepth: number;
   private maxPages: number;
   private onProgress: ProgressCallback | null;
@@ -45,6 +46,9 @@ export class Crawler {
     // Normalize: ensure trailing slash stripped, no trailing path junk
     this.targetUrl = targetUrl.replace(/\/+$/, '');
     this.targetHostname = new URL(this.targetUrl).hostname;
+    // Extract path prefix for scope limiting (e.g. /apps/mars2020 -> /apps/mars2020)
+    const parsedPath = new URL(this.targetUrl).pathname.replace(/\/+$/, '');
+    this.targetPathPrefix = parsedPath || '';
     this.maxDepth = maxDepth;
     this.maxPages = maxPages;
     this.onProgress = onProgress;
@@ -129,9 +133,16 @@ export class Crawler {
               await this.savePage(item.url, item.depth, item.parentUrl, data);
             }
 
-            // Add internal links to queue (depth + 1)
+            // Add internal links to queue (depth + 1), filtered by path scope
             for (const link of data.internalLinks) {
-              queue.add(link, item.depth + 1, item.url);
+              try {
+                const linkPath = new URL(link).pathname;
+                if (!this.targetPathPrefix || linkPath.startsWith(this.targetPathPrefix)) {
+                  queue.add(link, item.depth + 1, item.url);
+                }
+              } catch {
+                queue.add(link, item.depth + 1, item.url);
+              }
             }
           } catch (err) {
             console.error(`Error saving ${item.url}:`, err);
@@ -153,6 +164,9 @@ export class Crawler {
         // Short delay between batches
         if (!queue.isEmpty()) await this.delay(DELAY_MS);
       }
+
+      // Post-crawl: download missing assets (DXT textures, webmanifest, favicons)
+      await this.downloadMissingAssets();
 
       await this.updateJobStatus(this.aborted ? 'error' : 'done');
       this.emitProgress(parsedCount, parsedCount, '', this.aborted ? 'error' : 'done');
@@ -209,7 +223,8 @@ export class Crawler {
       }
 
       const targetHostname = this.targetHostname;
-      const urls = await page.evaluate(({ base, hostname }): string[] => {
+      const pathPrefix = this.targetPathPrefix;
+      const urls = await page.evaluate(({ base, hostname, prefix }): string[] => {
         const links = document.querySelectorAll('a[href]');
         const pageUrls: string[] = [];
         links.forEach((link) => {
@@ -218,14 +233,17 @@ export class Crawler {
           try {
             const resolved = new URL(href, base);
             if (resolved.hostname === hostname || resolved.hostname.endsWith('.' + hostname)) {
-              pageUrls.push(resolved.href);
+              // Only include URLs under the same path prefix
+              if (!prefix || resolved.pathname.startsWith(prefix)) {
+                pageUrls.push(resolved.href);
+              }
             }
           } catch {
             // skip
           }
         });
         return [...new Set(pageUrls)];
-      }, { base: this.targetUrl, hostname: targetHostname });
+      }, { base: this.targetUrl, hostname: targetHostname, prefix: pathPrefix });
 
       return urls;
     } finally {
@@ -290,6 +308,17 @@ export class Crawler {
         });
         // Wait for JS to render dynamic content
         await this.delay(JS_RENDER_WAIT);
+
+        // Auto-scroll to trigger lazy-loaded content (images, 3D models, etc.)
+        await this.autoScroll(page);
+
+        // Click interactive elements (arrows, tabs, carousels) to trigger dynamic content
+        await this.clickInteractiveElements(page);
+
+        // Wait for network to settle (dynamic asset loading like 3D models, textures)
+        await page.waitForLoadState('networkidle').catch(() => {});
+        // Extra buffer for any final async requests
+        await this.delay(2000);
 
         const data = await extractPageData(page, url);
 
@@ -425,6 +454,353 @@ export class Crawler {
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+
+  /** Scroll page to bottom to trigger lazy-loaded content */
+  private async autoScroll(page: Page): Promise<void> {
+    try {
+      await page.evaluate(async () => {
+        await new Promise<void>((resolve) => {
+          let totalHeight = 0;
+          const distance = 500;
+          const maxScrolls = 50; // Cap at 50 scrolls to avoid infinite pages
+          let scrolls = 0;
+          const timer = setInterval(() => {
+            const scrollHeight = document.body.scrollHeight;
+            window.scrollBy(0, distance);
+            totalHeight += distance;
+            scrolls++;
+            if (totalHeight >= scrollHeight || scrolls >= maxScrolls) {
+              // Scroll back to top
+              window.scrollTo(0, 0);
+              clearInterval(timer);
+              resolve();
+            }
+          }, 150);
+        });
+      });
+      // Wait for lazy-loaded content to finish loading
+      await this.delay(1000);
+    } catch { /* ignore scroll errors */ }
+  }
+
+  /** Click interactive elements (arrows, tabs, sliders, carousels) to trigger dynamic content loading */
+  private async clickInteractiveElements(page: Page): Promise<void> {
+    try {
+      // Find and click navigation/interactive elements
+      const clicked = await page.evaluate(async () => {
+        // Selectors for common interactive elements that load new content
+        const selectors = [
+          // Arrows / navigation
+          '[class*="arrow"]', '[class*="Arrow"]',
+          '[class*="next"]', '[class*="Next"]',
+          '[class*="prev"]', '[class*="Prev"]',
+          '[class*="slider"] button', '[class*="Slider"] button',
+          '[class*="carousel"] button', '[class*="Carousel"] button',
+          '[class*="swiper"] button', '[class*="Swiper"] button',
+          '[class*="gallery"] button', '[class*="Gallery"] button',
+          // Tab navigation
+          '[role="tab"]',
+          '[class*="tab-"]', '[class*="Tab"]',
+          // Generic navigation buttons
+          'button[class*="nav"]', 'button[class*="Nav"]',
+          // Pagination dots
+          '[class*="dot"]', '[class*="pagination"] button',
+          '[class*="bullet"]',
+          // Common specific selectors
+          '.slick-next', '.slick-prev',
+          '.owl-next', '.owl-prev',
+          '.splide__arrow',
+        ];
+
+        let clickCount = 0;
+        const clicked = new Set<Element>();
+
+        for (const selector of selectors) {
+          try {
+            const elements = document.querySelectorAll(selector);
+            for (const el of elements) {
+              if (clicked.has(el)) continue;
+              if (!(el instanceof HTMLElement)) continue;
+              // Only click visible elements
+              const rect = el.getBoundingClientRect();
+              if (rect.width === 0 || rect.height === 0) continue;
+              const style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+              clicked.add(el);
+              el.click();
+              clickCount++;
+              // Small delay between clicks
+              await new Promise(r => setTimeout(r, 300));
+
+              if (clickCount >= 30) break; // Cap at 30 clicks
+            }
+          } catch { /* ignore */ }
+          if (clickCount >= 30) break;
+        }
+
+        // Click "next" arrows multiple times to cycle through carousels
+        const nextSelectors = [
+          '[class*="next"]', '[class*="Next"]',
+          '.slick-next', '.owl-next',
+          '[class*="arrow-right"]', '[class*="ArrowRight"]',
+          '[class*="arrow"][class*="right"]',
+        ];
+        for (const selector of nextSelectors) {
+          try {
+            const nextBtn = document.querySelector(selector);
+            if (nextBtn && nextBtn instanceof HTMLElement) {
+              const rect = nextBtn.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                for (let i = 0; i < 10; i++) {
+                  nextBtn.click();
+                  await new Promise(r => setTimeout(r, 500));
+                  clickCount++;
+                }
+              }
+            }
+          } catch { /* ignore */ }
+        }
+
+        return clickCount;
+      });
+
+      if (clicked > 0) {
+        console.log(`[Crawler] Clicked ${clicked} interactive elements to trigger content loading`);
+        // Wait for content triggered by clicks to load
+        await this.delay(2000);
+      }
+    } catch { /* ignore interaction errors */ }
+  }
+
+  /**
+   * Post-crawl: download missing assets that the headless browser didn't fetch.
+   * 1. DXT textures (headless uses ASTC, desktop browsers need DXT)
+   * 2. Common files browsers request but don't trigger response events for (webmanifest, favicons)
+   */
+  private async downloadMissingAssets(): Promise<void> {
+    const cacheDir = join('./proxy-cache', this.targetHostname);
+    if (!existsSync(cacheDir)) return;
+    if (!this.browser) return;
+
+    const context = this.browser.contexts()[0] || await this.browser.newContext();
+    let downloaded = 0;
+
+    // 1. Download DXT alternates for ASTC textures
+    const astcFiles: string[] = [];
+    const findAstc = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isDirectory()) findAstc(fullPath);
+        else if (entry.name.endsWith('-astc.ktx')) astcFiles.push(fullPath);
+      }
+    };
+    findAstc(cacheDir);
+
+    if (astcFiles.length > 0) {
+      console.log(`[Crawler] Found ${astcFiles.length} ASTC textures, downloading DXT alternates...`);
+      for (const astcPath of astcFiles) {
+        const dxtPath = astcPath.replace('-astc.ktx', '-dxt.ktx');
+        if (existsSync(dxtPath)) continue;
+        const relativePath = astcPath.substring(cacheDir.length).replace(/\\/g, '/');
+        const dxtUrl = `https://${this.targetHostname}${relativePath.replace('-astc.ktx', '-dxt.ktx')}`;
+        try {
+          const response = await context.request.get(dxtUrl);
+          if (response.ok()) {
+            const body = await response.body();
+            const dir = dirname(dxtPath);
+            if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+            writeFileSync(dxtPath, body);
+            downloaded++;
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    // 2. Scan all cached HTML and JS files for referenced assets and download missing ones
+    const scanFiles: string[] = [];
+    const findScannable = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isDirectory()) findScannable(fullPath);
+        else if (entry.name.endsWith('.html') || entry.name.endsWith('.js') || entry.name.endsWith('.mjs') || entry.name.endsWith('.webmanifest') || entry.name.endsWith('.json') || entry.name.endsWith('.css')) {
+          // Only scan files < 5MB to avoid extremely huge bundles
+          if (statSync(fullPath).size < 5_000_000) {
+            scanFiles.push(fullPath);
+          }
+        }
+      }
+    };
+    findScannable(cacheDir);
+
+    // Extract all referenced URLs from HTML and JS files
+    const missingUrls = new Set<string>();
+    const refPatterns = [
+      /(?:href|src|content)=["']([^"']+?)["']/gi,
+      /url\(["']?([^"')]+?)["']?\)/gi,
+    ];
+    // JS/JSON patterns for service workers, manifests, and file references
+    const jsRefPatterns = [
+      /["']([^"']*?\.(?:webmanifest|json|js|css|png|jpe?g|ico|svg|woff2?|ttf|webp|gif|mp3|mp4|ogg|wav|glb|gltf|fbx|obj|bin|hdr))["']/gi,
+    ];
+    // Pattern for srcset-style paths: "path.jpg 640w,path2.jpg 1920w"
+    const srcsetPattern = /([\w/._-]+\.(?:png|jpe?g|webp|gif|svg|avif))\s+\d+w/gi;
+
+    for (const file of scanFiles) {
+      try {
+        const content = readFileSync(file, 'utf-8');
+        const fileDir = dirname(file);
+        const relToCache = fileDir.substring(cacheDir.length).replace(/\\/g, '/');
+        const isHtml = file.endsWith('.html');
+        const isJson = file.endsWith('.json');
+        const isCss = file.endsWith('.css');
+        // Use all patterns for all file types to catch references everywhere
+        const patterns = isHtml ? [...refPatterns, ...jsRefPatterns] : isCss ? refPatterns : jsRefPatterns;
+
+        for (const pattern of patterns) {
+          pattern.lastIndex = 0;
+          let match;
+          while ((match = pattern.exec(content)) !== null) {
+            const ref = match[1];
+            if (!ref || ref.startsWith('data:') || ref.startsWith('javascript:') || ref.startsWith('#') || ref.startsWith('mailto:') || ref.length > 200) continue;
+            // Skip obvious non-path strings
+            if (ref.includes(' ') || ref.includes('{') || ref.includes('}')) continue;
+
+            let assetPath: string;
+            if (ref.startsWith('http://') || ref.startsWith('https://')) {
+              try {
+                const parsed = new URL(ref);
+                if (parsed.hostname !== this.targetHostname) continue;
+                assetPath = parsed.pathname;
+              } catch { continue; }
+            } else if (ref.startsWith('/')) {
+              assetPath = ref.split('?')[0].split('#')[0];
+            } else {
+              // Relative path — try both as-is (from site root) and relative to current file
+              const cleaned = ref.split('?')[0].split('#')[0];
+              const fromRoot = `/${cleaned}`;
+              const fromFile = `${relToCache}/${cleaned}`;
+              // Prefer root-relative if it would avoid path duplication
+              assetPath = fromRoot;
+              if (existsSync(join(cacheDir, fromFile)) || !cleaned.includes('/')) {
+                assetPath = fromFile;
+              }
+            }
+
+            const cachePath = join(cacheDir, assetPath);
+            if (!existsSync(cachePath) && !existsSync(cachePath + '/index.html')) {
+              missingUrls.add(assetPath);
+            }
+          }
+        }
+
+        // Scan for srcset-style paths in any file (e.g. data.json with responsive images)
+        srcsetPattern.lastIndex = 0;
+        let srcsetMatch;
+        while ((srcsetMatch = srcsetPattern.exec(content)) !== null) {
+          const ref = srcsetMatch[1];
+          const assetPath = ref.startsWith('/') ? ref : (ref.includes('/') ? `/${ref}` : `${relToCache}/${ref}`);
+          const cachePath = join(cacheDir, assetPath);
+          if (!existsSync(cachePath)) missingUrls.add(assetPath);
+        }
+
+        // For JSON files, also look for any string values that look like file paths
+        if (isJson) {
+          const jsonPathPattern = /:\s*"([^"]*?(?:\/[^"]*?)?\.(?:png|jpe?g|webp|gif|svg|avif|mp4|webm|mp3|ogg|wav|glb|gltf|obj|fbx|bin|hdr|ktx|ktx2|css|js|woff2?|ttf|ico))"/gi;
+          jsonPathPattern.lastIndex = 0;
+          let jsonMatch;
+          while ((jsonMatch = jsonPathPattern.exec(content)) !== null) {
+            const ref = jsonMatch[1];
+            if (!ref || ref.startsWith('data:') || ref.length > 300) continue;
+            let assetPath: string;
+            if (ref.startsWith('http://') || ref.startsWith('https://')) {
+              try {
+                const parsed = new URL(ref);
+                if (parsed.hostname !== this.targetHostname) continue;
+                assetPath = parsed.pathname;
+              } catch { continue; }
+            } else if (ref.startsWith('/')) {
+              assetPath = ref;
+            } else {
+              // Relative path — treat as root-relative if it contains slashes
+              assetPath = ref.includes('/') ? `/${ref}` : `${relToCache}/${ref}`;
+            }
+            const cachePath = join(cacheDir, assetPath);
+            if (!existsSync(cachePath)) missingUrls.add(assetPath);
+          }
+        }
+
+        // Also scan HTML for <link rel="manifest"> specifically
+        if (isHtml) {
+          const manifestMatch = content.match(/<link[^>]*rel=["']manifest["'][^>]*href=["']([^"']+)["']/i);
+          if (manifestMatch) {
+            const ref = manifestMatch[1];
+            const assetPath = ref.startsWith('/') ? ref : `${relToCache}/${ref}`;
+            const cachePath = join(cacheDir, assetPath.split('?')[0]);
+            if (!existsSync(cachePath)) missingUrls.add(assetPath.split('?')[0]);
+          }
+        }
+      } catch { /* skip unreadable files */ }
+    }
+
+    // Also add common PWA files that might be referenced from JS
+    const targetPath = new URL(this.targetUrl).pathname.replace(/\/+$/, '') || '';
+    const pwaFiles = [
+      '/manifest.webmanifest', '/manifest.json', '/ngsw-worker.js', '/sw.js', '/service-worker.js',
+      '/favicon.ico', '/favicon-16x16.png', '/favicon-32x32.png',
+      `${targetPath}/manifest.webmanifest`, `${targetPath}/manifest.json`,
+      `${targetPath}/ngsw-worker.js`, `${targetPath}/ngsw.json`,
+    ];
+    for (const f of pwaFiles) {
+      const cachePath = join(cacheDir, f);
+      if (!existsSync(cachePath)) missingUrls.add(f);
+    }
+
+    // Filter out likely false positives (common JS variable names, node_modules paths, etc.)
+    const filtered = [...missingUrls].filter(p => {
+      // Must have a file extension
+      if (!/\.\w{2,5}$/.test(p)) return false;
+      // Skip node_modules, webpack internals, sourcemaps
+      if (p.includes('node_modules') || p.includes('webpack') || p.endsWith('.map')) return false;
+      // Skip very short names that are likely false matches
+      const filename = p.split('/').pop() || '';
+      if (filename.length < 3) return false;
+      return true;
+    });
+
+    if (filtered.length > 0) {
+      const toDownload = filtered;
+      console.log(`[Crawler] Downloading ${toDownload.length} missing assets...`);
+      this.emitProgress(0, 0, `Downloading ${toDownload.length} missing assets...`, 'running');
+
+      // Download in parallel batches of 10
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < toDownload.length; i += BATCH_SIZE) {
+        if (this.aborted) break;
+        const batch = toDownload.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map(async (assetPath) => {
+            const cachePath = join(cacheDir, assetPath);
+            const url = `https://${this.targetHostname}${assetPath}`;
+            const response = await context.request.get(url, { timeout: 5000 });
+            if (response.ok()) {
+              const body = await response.body();
+              const dir = dirname(cachePath);
+              if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+              writeFileSync(cachePath, body);
+              return true;
+            }
+            return false;
+          })
+        );
+        downloaded += results.filter(r => r.status === 'fulfilled' && r.value).length;
+      }
+    }
+
+    console.log(`[Crawler] Downloaded ${downloaded} missing asset files`);
+  }
 }
 
 interface ParsedPage {
@@ -449,9 +825,9 @@ function isAssetUrl(url: string, contentType: string): boolean {
   const assetExtensions = [
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.avif', '.ico',
     '.mp4', '.webm', '.ogg', '.mov',
-    '.glb', '.gltf', '.obj', '.fbx', '.usdz',
+    '.glb', '.gltf', '.obj', '.fbx', '.usdz', '.ktx', '.ktx2', '.basis', '.buf', '.exr', '.hdr',
     '.woff', '.woff2', '.ttf', '.otf',
-    '.css', '.js', '.mjs',
+    '.css', '.js', '.mjs', '.webmanifest', '.json',
   ];
   try {
     const pathname = new URL(url).pathname.toLowerCase();
