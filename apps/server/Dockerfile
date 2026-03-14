@@ -1,11 +1,7 @@
 FROM node:22-slim
 
-# Install dependencies for Playwright chromium
-RUN apt-get update && apt-get install -y \
-    libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
-    libcups2 libdrm2 libxcomposite1 libxdamage1 libxrandr2 \
-    libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
-    && rm -rf /var/lib/apt/lists/*
+# Install Playwright system dependencies
+RUN npx playwright install-deps chromium
 
 WORKDIR /app
 
