@@ -33,7 +33,9 @@ async function buildServer() {
 
   await fastify.register(cors, {
     origin: allowedOrigins,
-    methods: ['GET', 'POST', 'DELETE', 'PUT', 'PATCH'],
+    methods: ['GET', 'POST', 'DELETE', 'PUT', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
   });
 
   // WebSocket
