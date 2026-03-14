@@ -380,6 +380,12 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       `    return;\n` +
       `  }\n` +
       `  let fp = path.join(ROOT, url);\n` +
+      `  // Redirect directories to trailing slash (fixes relative paths in HTML)\n` +
+      `  if (fs.existsSync(fp) && fs.statSync(fp).isDirectory() && !url.endsWith("/")) {\n` +
+      `    res.writeHead(301, { Location: url + "/" });\n` +
+      `    res.end();\n` +
+      `    return;\n` +
+      `  }\n` +
       `  if (fs.existsSync(fp) && fs.statSync(fp).isDirectory()) fp = path.join(fp, "index.html");\n` +
       `  if (!fs.existsSync(fp) && !path.extname(fp)) {\n` +
       `    const wi = path.join(fp, "index.html");\n` +
