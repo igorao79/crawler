@@ -251,16 +251,20 @@ export class Crawler {
       const urls = await page.evaluate(({ base, hostname, prefix }): string[] => {
         const links = document.querySelectorAll('a[href]');
         const pageUrls: string[] = [];
+        // Auth/app paths to skip
+        const skipPaths = ['/signup', '/login', '/register', '/signin', '/auth', '/oauth', '/sso', '/account', '/dashboard', '/console'];
         links.forEach((link) => {
           const href = link.getAttribute('href');
           if (!href) return;
           try {
             const resolved = new URL(href, base);
-            if (resolved.hostname === hostname || resolved.hostname.endsWith('.' + hostname)) {
-              // Only include URLs under the same path prefix
-              if (!prefix || resolved.pathname.startsWith(prefix)) {
-                pageUrls.push(resolved.href);
-              }
+            if (resolved.hostname !== hostname && !resolved.hostname.endsWith('.' + hostname)) return;
+            // Skip auth/app paths
+            const lowerPath = resolved.pathname.toLowerCase();
+            if (skipPaths.some(sp => lowerPath === sp || lowerPath.startsWith(sp + '/'))) return;
+            // Only include URLs under the same path prefix
+            if (!prefix || resolved.pathname.startsWith(prefix)) {
+              pageUrls.push(resolved.href);
             }
           } catch {
             // skip
@@ -765,12 +769,12 @@ export class Crawler {
     // Extract all referenced URLs from HTML and JS files
     const missingUrls = new Set<string>();
     const refPatterns = [
-      /(?:href|src|content)=["']([^"']+?)["']/gi,
+      /(?:data-href|data-src|data-srcset|data-background|href|src|content|poster|srcset)=["']([^"']+?)["']/gi,
       /url\(["']?([^"')]+?)["']?\)/gi,
     ];
     // JS/JSON patterns for service workers, manifests, and file references
     const jsRefPatterns = [
-      /["']([^"']*?\.(?:webmanifest|json|js|css|png|jpe?g|ico|svg|woff2?|ttf|webp|gif|avif|mp3|mp4|ogg|wav|glb|gltf|fbx|obj|bin|hdr|ktx2?|exr|wasm|basis))["']/gi,
+      /["']([^"']*?\.(?:html|webmanifest|json|js|css|png|jpe?g|ico|svg|woff2?|ttf|webp|gif|avif|mp3|mp4|ogg|wav|glb|gltf|fbx|obj|bin|hdr|ktx2?|exr|wasm|basis))["']/gi,
     ];
     // Pattern for srcset-style paths: "path.jpg 640w,path2.jpg 1920w"
     const srcsetPattern = /([\w/._-]+\.(?:png|jpe?g|webp|gif|svg|avif))\s+\d+w/gi;
@@ -1023,7 +1027,9 @@ export class Crawler {
               const response = await context.request.get(url, { timeout });
               if (response.ok()) {
                 const ct = response.headers()['content-type'] || '';
-                if (ct.includes('text/html')) return false;
+                // Skip HTML responses for non-.html files (SPA fallback pages)
+                // But allow actual .html files (e.g. portfolio fragments loaded via AJAX)
+                if (ct.includes('text/html') && !assetPath.endsWith('.html')) return false;
                 const body = await response.body();
                 if (body.length === 0) return false;
                 const dir = dirname(cachePath);

@@ -11,9 +11,14 @@ interface FetchOptions {
 async function apiFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
   const { method = 'GET', body } = options;
 
+  const headers: Record<string, string> = {
+    'ngrok-skip-browser-warning': '1',
+  };
+  if (body) headers['Content-Type'] = 'application/json';
+
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -159,7 +164,9 @@ export function getSourceTree(): Promise<SourceTree> {
 }
 
 export async function getSourceFile(category: string, name: string): Promise<string> {
-  const res = await fetch(`${API_BASE}/api/source/file?category=${encodeURIComponent(category)}&name=${encodeURIComponent(name)}`);
+  const res = await fetch(`${API_BASE}/api/source/file?category=${encodeURIComponent(category)}&name=${encodeURIComponent(name)}`, {
+    headers: { 'ngrok-skip-browser-warning': '1' },
+  });
   if (!res.ok) throw new Error(`Failed to load file: HTTP ${res.status}`);
   return res.text();
 }
@@ -206,7 +213,7 @@ export async function startDeobfuscation(
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/api/source/deobfuscate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': '1' },
     body: JSON.stringify({ fileName }),
   });
 
