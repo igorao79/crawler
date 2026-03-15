@@ -1048,6 +1048,81 @@ export class Crawler {
     }
 
     console.log(`[Crawler] Downloaded ${downloaded} missing asset files`);
+
+    // Second pass: scan newly downloaded HTML files for nested asset references
+    if (downloaded > 0) {
+      const newHtmlFiles: string[] = [];
+      const walkNew = (dir: string) => {
+        if (!existsSync(dir)) return;
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) walkNew(full);
+          else if (entry.name.endsWith('.html') && !entry.name.endsWith('.meta.json')) newHtmlFiles.push(full);
+        }
+      };
+      walkNew(cacheDir);
+
+      const extraMissing = new Set<string>();
+      const allPatterns = [
+        /(?:data-href|data-src|data-background|href|src|content|poster)=["']([^"']+?)["']/gi,
+        /url\(["']?([^"')]+?)["']?\)/gi,
+        /["']([^"']*?\.(?:png|jpe?g|ico|svg|woff2?|ttf|webp|gif|avif|mp3|mp4|ogg|wav|glb|gltf|fbx|obj|bin|hdr|ktx2?|exr|wasm|css|js))["']/gi,
+      ];
+
+      for (const file of newHtmlFiles) {
+        try {
+          const content = readFileSync(file, 'utf-8');
+          for (const pattern of allPatterns) {
+            pattern.lastIndex = 0;
+            let match;
+            while ((match = pattern.exec(content)) !== null) {
+              const ref = match[1];
+              if (!ref || ref.startsWith('data:') || ref.startsWith('http') || ref.startsWith('#') || ref.startsWith('mailto:') || ref.length > 300) continue;
+              const cleaned = ref.split('?')[0].split('#')[0];
+              const assetPath = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
+              const cachePath = join(cacheDir, assetPath);
+              if (!existsSync(cachePath) && /\.\w{2,10}$/.test(assetPath)) {
+                extraMissing.add(assetPath);
+              }
+            }
+          }
+        } catch { /* skip */ }
+      }
+
+      if (extraMissing.size > 0) {
+        console.log(`[Crawler] Second pass: downloading ${extraMissing.size} assets from new HTML files...`);
+        let extraDownloaded = 0;
+        const extraBatch = [...extraMissing];
+        for (let i = 0; i < extraBatch.length; i += 20) {
+          if (this.aborted) break;
+          const batch = extraBatch.slice(i, i + 20);
+          const results = await Promise.allSettled(
+            batch.map(async (assetPath) => {
+              const encodedPath = assetPath.split('/').map(seg => encodeURIComponent(decodeURIComponent(seg))).join('/');
+              const cachePath = join(cacheDir, encodedPath);
+              const url = `https://${this.targetHostname}${encodedPath}`;
+              try {
+                const response = await context.request.get(url, { timeout: 5000 });
+                if (response.ok()) {
+                  const ct = response.headers()['content-type'] || '';
+                  if (ct.includes('text/html') && !assetPath.endsWith('.html')) return false;
+                  const body = await response.body();
+                  if (body.length === 0) return false;
+                  const dir = dirname(cachePath);
+                  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+                  writeFileSync(cachePath, body);
+                  return true;
+                }
+              } catch { /* skip */ }
+              return false;
+            })
+          );
+          extraDownloaded += results.filter(r => r.status === 'fulfilled' && r.value).length;
+        }
+        console.log(`[Crawler] Second pass: downloaded ${extraDownloaded} extra assets`);
+        downloaded += extraDownloaded;
+      }
+    }
   }
 }
 
