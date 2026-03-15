@@ -377,6 +377,12 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
           // Skip files without extensions (likely SPA fallback pages like "Logartis", "summary_large_image")
           if (!ext && entry.name !== 'LICENSE' && entry.name !== 'CNAME') continue;
 
+          // Skip query-string fallback pages (_query_*.html, _query_*.json)
+          if (entry.name.startsWith('_query_')) continue;
+
+          // Skip tracking pixels and analytics artifacts
+          if (entry.name === 'counters.gif' || entry.name === 'beacon.min.js') continue;
+
           // Skip npm package paths (e.g. zone.js/dist/) that were fetched as SPA fallback
           const relPath = fullPath.substring(cacheDir.length).replace(/\\/g, '/');
           if (/^\/?\w[\w.-]*\.\w+\//.test(relPath) && !/^\/?_/.test(relPath) && !/^\/?assets/i.test(relPath)) continue;

@@ -2,6 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "backend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["node_modules/tsx/dist/cli.mjs", "apps/server/src/server.ts"],
+      "port": 3001,
+      "env": {
+        "LOCALAPPDATA": "C:\\Users\\Admin\\AppData\\Local",
+        "PLAYWRIGHT_BROWSERS_PATH": "C:\\Users\\Admin\\AppData\\Local\\ms-playwright"
+      }
+    },
+    {
       "name": "web",
       "runtimeExecutable": "node",
       "runtimeArgs": ["../../node_modules/next/dist/bin/next", "dev"],

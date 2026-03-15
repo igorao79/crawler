@@ -62,6 +62,7 @@ export class Crawler {
 
       this.browser = await chromium.launch({
         headless: true,
+        channel: 'chrome', // Use system Chrome instead of bundled Chromium
         args: [
           '--disable-blink-features=AutomationControlled',
           '--window-size=1920,1080',
@@ -684,10 +685,15 @@ export class Crawler {
     findAllFiles(cacheDir);
 
     const mobileAlternates: Array<{ path: string; url: string }> = [];
+    // Only generate mobile alternates for 3D/media assets, not HTML/CSS/JS
+    const MOBILE_ALT_EXTS = new Set(['.buf', '.glb', '.gltf', '.obj', '.fbx', '.exr', '.hdr', '.ktx', '.ktx2', '.png', '.jpg', '.jpeg', '.webp', '.mp4', '.webm', '.mp3', '.ogg']);
     for (const file of allCachedFiles) {
       const rel = file.substring(cacheDir.length).replace(/\\/g, '/');
-      const ext = rel.substring(rel.lastIndexOf('.'));
+      const ext = rel.substring(rel.lastIndexOf('.')).toLowerCase();
+      if (!MOBILE_ALT_EXTS.has(ext)) continue;
       const base = rel.substring(0, rel.lastIndexOf('.'));
+      // Skip files that already have _ld/_low suffix
+      if (base.endsWith('_ld') || base.endsWith('_low')) continue;
       // Generate _ld and _low variants
       for (const suffix of ['_ld', '_low']) {
         const altPath = `${base}${suffix}${ext}`;
@@ -764,7 +770,7 @@ export class Crawler {
     ];
     // JS/JSON patterns for service workers, manifests, and file references
     const jsRefPatterns = [
-      /["']([^"']*?\.(?:webmanifest|json|js|css|png|jpe?g|ico|svg|woff2?|ttf|webp|gif|mp3|mp4|ogg|wav|glb|gltf|fbx|obj|bin|hdr))["']/gi,
+      /["']([^"']*?\.(?:webmanifest|json|js|css|png|jpe?g|ico|svg|woff2?|ttf|webp|gif|avif|mp3|mp4|ogg|wav|glb|gltf|fbx|obj|bin|hdr|ktx2?|exr|wasm|basis))["']/gi,
     ];
     // Pattern for srcset-style paths: "path.jpg 640w,path2.jpg 1920w"
     const srcsetPattern = /([\w/._-]+\.(?:png|jpe?g|webp|gif|svg|avif))\s+\d+w/gi;
@@ -774,14 +780,23 @@ export class Crawler {
     const globalBareFilenames = new Set<string>();
 
     // First pass: collect path prefixes from all JS files
+    // Matches both string concat ("path/" +) and template literals (`path/${`)
     for (const file of scanFiles) {
       if (!file.endsWith('.js') && !file.endsWith('.mjs')) continue;
       try {
         const content = readFileSync(file, 'utf-8');
+        // String concatenation: "path/" + var
         const concatPattern = /["'](\/[a-zA-Z0-9_/-]+\/)["']\s*\+/g;
         let cm;
         while ((cm = concatPattern.exec(content)) !== null) {
           globalPrefixes.add(cm[1]);
+        }
+        // Template literals: `path/${var}` — prefix without leading slash too
+        const templatePattern = /`([a-zA-Z0-9_/-]+\/)\$\{/g;
+        let tm;
+        while ((tm = templatePattern.exec(content)) !== null) {
+          const prefix = tm[1].startsWith('/') ? tm[1] : '/' + tm[1];
+          globalPrefixes.add(prefix);
         }
       } catch {}
     }
@@ -802,9 +817,10 @@ export class Crawler {
           let match;
           while ((match = pattern.exec(content)) !== null) {
             const ref = match[1];
-            if (!ref || ref.startsWith('data:') || ref.startsWith('javascript:') || ref.startsWith('#') || ref.startsWith('mailto:') || ref.length > 200) continue;
-            // Skip obvious non-path strings
-            if (ref.includes(' ') || ref.includes('{') || ref.includes('}')) continue;
+            if (!ref || ref.startsWith('data:') || ref.startsWith('javascript:') || ref.startsWith('#') || ref.startsWith('mailto:') || ref.length > 300) continue;
+            // Skip obvious non-path strings (but allow spaces in media file paths)
+            if (ref.includes('{') || ref.includes('}')) continue;
+            if (ref.includes(' ') && !/\.(?:mp3|mp4|ogg|wav|webm|glb|gltf|fbx|obj|ktx2?|exr|hdr|png|jpe?g|webp|gif|svg|avif|wasm|woff2?|ttf)$/i.test(ref)) continue;
 
             let assetPath: string;
             if (ref.startsWith('http://') || ref.startsWith('https://')) {
@@ -816,23 +832,38 @@ export class Crawler {
             } else if (ref.startsWith('/')) {
               assetPath = ref.split('?')[0].split('#')[0];
             } else {
-              // Relative path — try both as-is (from site root) and relative to current file
-              const cleaned = ref.replace(/^\.\//, '').split('?')[0].split('#')[0];
-              const fromRoot = `/${cleaned}`;
-              const fromFile = `${relToCache}/${cleaned}`;
-              // Prefer root-relative if it would avoid path duplication
-              assetPath = fromRoot;
-              if (existsSync(join(cacheDir, fromFile)) || !cleaned.includes('/')) {
-                assetPath = fromFile;
-                // Track bare filenames for cross-file prefix matching
-                if (!cleaned.includes('/')) {
-                  globalBareFilenames.add(cleaned);
+              // Relative path — resolve relative to current file's directory
+              const cleaned = ref.split('?')[0].split('#')[0];
+              // Handle ../ and ./ by resolving relative to the file's directory
+              if (cleaned.startsWith('../') || cleaned.startsWith('./')) {
+                // Resolve: relToCache="/assets", ref="../ui/map/player.webp" → "/ui/map/player.webp"
+                const parts = (relToCache + '/' + cleaned).split('/').filter(Boolean);
+                const resolved: string[] = [];
+                for (const p of parts) {
+                  if (p === '..') resolved.pop();
+                  else if (p !== '.') resolved.push(p);
                 }
+                assetPath = '/' + resolved.join('/');
+              } else {
+                const fromRoot = `/${cleaned}`;
+                const fromFile = `${relToCache}/${cleaned}`;
+                // Prefer root-relative if it would avoid path duplication
+                assetPath = fromRoot;
+                if (existsSync(join(cacheDir, fromFile)) || !cleaned.includes('/')) {
+                  assetPath = fromFile;
+                }
+              }
+              // Track bare filenames for cross-file prefix matching
+              if (!cleaned.includes('/')) {
+                globalBareFilenames.add(cleaned);
               }
             }
 
             const cachePath = join(cacheDir, assetPath);
-            if (!existsSync(cachePath) && !existsSync(cachePath + '/index.html')) {
+            // Also check URL-encoded version (files with spaces stored as %20)
+            const encodedAssetPath = assetPath.split('/').map(seg => encodeURIComponent(decodeURIComponent(seg))).join('/');
+            const encodedCachePath = join(cacheDir, encodedAssetPath);
+            if (!existsSync(cachePath) && !existsSync(encodedCachePath) && !existsSync(cachePath + '/index.html')) {
               missingUrls.add(assetPath);
             }
           }
@@ -891,9 +922,36 @@ export class Crawler {
           const manifestMatch = content.match(/<link[^>]*rel=["']manifest["'][^>]*href=["']([^"']+)["']/i);
           if (manifestMatch) {
             const ref = manifestMatch[1];
-            const assetPath = ref.startsWith('/') ? ref : `${relToCache}/${ref}`;
-            const cachePath = join(cacheDir, assetPath.split('?')[0]);
-            if (!existsSync(cachePath)) missingUrls.add(assetPath.split('?')[0]);
+            // Handle ./ prefix in manifest href
+            const cleaned = ref.replace(/^\.\//, '').split('?')[0].split('#')[0];
+            const assetPath = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
+            const cachePath = join(cacheDir, assetPath);
+            if (!existsSync(cachePath)) missingUrls.add(assetPath);
+          }
+        }
+
+        // Scan JS for template literals: `prefix/${var}Suffix.ext`
+        // Resolves dynamic paths by finding all possible variable values
+        if (!isHtml && !isJson && !isCss) {
+          const templateSuffixPattern = /`([a-zA-Z0-9_/-]*\/)\$\{(\w+)\}([a-zA-Z0-9_-]*\.(?:ktx2?|webp|png|jpe?g|glb|gltf|mp4|mp3|wasm|svg|buf|exr|hdr))`/g;
+          templateSuffixPattern.lastIndex = 0;
+          let tsm;
+          while ((tsm = templateSuffixPattern.exec(content)) !== null) {
+            const prefix = tsm[1].startsWith('/') ? tsm[1] : '/' + tsm[1];
+            const varName = tsm[2];
+            const suffix = tsm[3]; // e.g. "Label.ktx"
+            // Find string literals assigned/compared to this variable in the same file
+            const valPattern = new RegExp(`(?:${varName}\\s*=\\s*|${varName}\\s*===?\\s*)"([^"]{1,80})"`, 'g');
+            let vm;
+            while ((vm = valPattern.exec(content)) !== null) {
+              const val = vm[1];
+              // Skip values that look like code/URLs, not variable values
+              if (val.includes('/') || val.includes('{') || val.includes('(') || val.startsWith('http')) continue;
+              const fullPath = `${prefix}${val}${suffix}`;
+              if (!existsSync(join(cacheDir, fullPath))) {
+                missingUrls.add(fullPath);
+              }
+            }
           }
         }
       } catch { /* skip unreadable files */ }
@@ -914,8 +972,8 @@ export class Crawler {
 
     // Filter out likely false positives
     const filtered = [...missingUrls].filter(p => {
-      // Must have a file extension
-      if (!/\.\w{2,5}$/.test(p)) return false;
+      // Must have a file extension (up to 15 chars for .webmanifest etc.)
+      if (!/\.\w{2,15}$/.test(p)) return false;
       // Skip node_modules, webpack internals, sourcemaps
       if (p.includes('node_modules') || p.includes('webpack') || p.endsWith('.map')) return false;
       // Skip very short names that are likely false matches
@@ -929,11 +987,9 @@ export class Crawler {
       // Skip bare filenames without any directory that don't look like real assets
       // (e.g. "Logartis", "Next.js", "Three.js", "Node.js", "summary_large_image")
       if (!p.includes('/') || p.split('/').filter(Boolean).length <= 1) {
-        // Only allow known PWA/root files
-        const allowedRootFiles = ['manifest.webmanifest', 'manifest.json', 'ngsw-worker.js', 'sw.js',
-          'service-worker.js', 'favicon.ico', 'favicon-16x16.png', 'favicon-32x32.png', 'ngsw.json',
-          'robots.txt', 'sitemap.xml', 'browserconfig.xml'];
-        if (!allowedRootFiles.includes(filename)) return false;
+        // Allow known asset extensions at root level (images, media, fonts, 3D, etc.)
+        const assetExts = /\.(png|jpe?g|webp|gif|svg|avif|ico|mp3|mp4|webm|ogg|wav|glb|gltf|obj|fbx|hdr|ktx2?|exr|wasm|buf|basis|woff2?|ttf|otf|css|json|webmanifest|xml|txt)$/i;
+        if (!assetExts.test(filename)) return false;
       }
       return true;
     });
@@ -945,7 +1001,7 @@ export class Crawler {
       const assetsTotal = toDownload.length;
 
       // Separate media (large) and other (small) assets for different batch sizes
-      const MEDIA_EXTS = new Set(['.mp4', '.webm', '.mp3', '.ogg', '.wav', '.glb', '.gltf', '.obj', '.fbx', '.hdr']);
+      const MEDIA_EXTS = new Set(['.mp4', '.webm', '.mp3', '.ogg', '.wav', '.glb', '.gltf', '.obj', '.fbx', '.hdr', '.ktx', '.ktx2', '.exr', '.wasm', '.basis']);
       const mediaFiles = toDownload.filter(p => MEDIA_EXTS.has(p.substring(p.lastIndexOf('.')).toLowerCase()));
       const otherFiles = toDownload.filter(p => !MEDIA_EXTS.has(p.substring(p.lastIndexOf('.')).toLowerCase()));
       // Download small assets first (batch of 10), then media (batch of 3)
@@ -957,27 +1013,25 @@ export class Crawler {
         const batch = orderedFiles.slice(i, i + currentBatch);
         const results = await Promise.allSettled(
           batch.map(async (assetPath) => {
-            const cachePath = join(cacheDir, assetPath);
+            // Handle paths with spaces — encode for URL, keep original for cache
+            const encodedPath = assetPath.split('/').map(seg => encodeURIComponent(decodeURIComponent(seg))).join('/');
+            const cachePath = join(cacheDir, encodedPath);
             const ext = assetPath.substring(assetPath.lastIndexOf('.')).toLowerCase();
-            const timeout = MEDIA_EXTS.has(ext) ? 30000 : 5000;
-            // Try target domain first, then external asset domains
-            const domains = [this.targetHostname, ...extDomains];
-            for (const domain of domains) {
-              try {
-                const url = `https://${domain}${assetPath}`;
-                const response = await context.request.get(url, { timeout });
-                if (response.ok()) {
-                  const ct = response.headers()['content-type'] || '';
-                  if (ct.includes('text/html')) continue; // HTML = error page, try next domain
-                  const body = await response.body();
-                  if (body.length === 0) continue;
-                  const dir = dirname(cachePath);
-                  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-                  writeFileSync(cachePath, body);
-                  return true;
-                }
-              } catch { /* try next domain */ }
-            }
+            const timeout = MEDIA_EXTS.has(ext) ? 15000 : 3000;
+            const url = `https://${this.targetHostname}${encodedPath}`;
+            try {
+              const response = await context.request.get(url, { timeout });
+              if (response.ok()) {
+                const ct = response.headers()['content-type'] || '';
+                if (ct.includes('text/html')) return false;
+                const body = await response.body();
+                if (body.length === 0) return false;
+                const dir = dirname(cachePath);
+                if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+                writeFileSync(cachePath, body);
+                return true;
+              }
+            } catch { /* skip */ }
             return false;
           })
         );
