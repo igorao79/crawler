@@ -275,16 +275,24 @@ export class Crawler {
       const cacheDir = join('./proxy-cache', this.targetHostname);
       if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
 
-      // Intercept all network responses — save to cache directly from browser
+      // Intercept network responses — cache assets from external domains (e.g. lusion.dev for lusion.co)
+      // Assets from the target domain are already cached by the proxy
+      const skipDomains = ['google-analytics.com', 'googletagmanager.com', 'cloudflare.com', 'facebook.net', 'twitter.com', 'doubleclick.net', 'google.com', 'gstatic.com', 'googleapis.com', 'vimeo.com', 'vimeocdn.com', 'twimg.com'];
       page.on('response', async (response) => {
         const resUrl = response.url();
         const contentType = response.headers()['content-type'] ?? '';
         const status = response.status();
         if (status >= 200 && status < 400) {
-          // Cache the response body to disk
           try {
             const parsed = new URL(resUrl);
-            if (parsed.hostname === this.targetHostname || parsed.hostname.endsWith('.' + this.targetHostname)) {
+            const hostname = parsed.hostname;
+            const isTargetDomain = hostname === this.targetHostname || hostname.endsWith('.' + this.targetHostname);
+            const isAsset = isAssetUrl(resUrl, contentType);
+            const isSkipped = skipDomains.some(d => hostname.endsWith(d));
+
+            // Cache external domain assets into the same cache dir (same pathname)
+            // Proxy already handles target domain caching
+            if (!isTargetDomain && isAsset && !isSkipped) {
               let safePath = parsed.pathname.replace(/[?#].*$/, '');
               if (safePath.endsWith('/') || safePath === '') safePath += 'index.html';
               const lastSeg = safePath.split('/').pop() || '';
@@ -295,8 +303,7 @@ export class Crawler {
               const body = await response.body().catch(() => null);
               if (body && !existsSync(cachePath)) {
                 writeFileSync(cachePath, body);
-                // Save meta
-                const meta = { contentType, status, url: resUrl, cachedAt: new Date().toISOString() };
+                const meta = { contentType, status, url: resUrl, hostname, cachedAt: new Date().toISOString() };
                 writeFileSync(cachePath + '.meta.json', JSON.stringify(meta, null, 2));
               }
             }
@@ -309,8 +316,9 @@ export class Crawler {
       });
 
       try {
-        // Navigate directly to the URL (browser has cookies/sessions)
-        await page.goto(url, {
+        // Navigate through proxy so all relative assets get cached automatically
+        const proxyPageUrl = url.replace(new URL(url).origin, PROXY_URL);
+        await page.goto(proxyPageUrl, {
           waitUntil: 'load',
           timeout: PAGE_TIMEOUT,
         });
@@ -598,6 +606,29 @@ export class Crawler {
     const context = this.context || this.browser.contexts()[0] || await this.browser.newContext();
     let downloaded = 0;
 
+    // Collect external asset domains from cached meta files
+    const extDomains = new Set<string>();
+    const findDomains = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fp = join(dir, entry.name);
+        if (entry.isDirectory()) findDomains(fp);
+        else if (entry.name.endsWith('.meta.json')) {
+          try {
+            const meta = JSON.parse(readFileSync(fp, 'utf-8'));
+            if (meta.url) {
+              const h = new URL(meta.url).hostname;
+              if (h !== this.targetHostname && !h.endsWith('.' + this.targetHostname)) extDomains.add(h);
+            }
+          } catch {}
+        }
+      }
+    };
+    findDomains(cacheDir);
+    if (extDomains.size > 0) {
+      console.log(`[Crawler] Found external asset domains: ${[...extDomains].join(', ')}`);
+    }
+
     // 1. Download DXT alternates for ASTC textures
     const astcFiles: string[] = [];
     const findAstc = (dir: string) => {
@@ -627,6 +658,75 @@ export class Crawler {
             downloaded++;
           }
         } catch { /* skip */ }
+      }
+    }
+
+    // 1b. Download mobile/low-detail alternates for existing assets
+    // Sites serve _ld (low detail), _low, mobile variants for mobile devices
+    const allCachedFiles: string[] = [];
+    const findAllFiles = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fp = join(dir, entry.name);
+        if (entry.isDirectory()) findAllFiles(fp);
+        else if (!entry.name.endsWith('.meta.json')) allCachedFiles.push(fp);
+      }
+    };
+    findAllFiles(cacheDir);
+
+    const mobileAlternates: Array<{ path: string; url: string }> = [];
+    for (const file of allCachedFiles) {
+      const rel = file.substring(cacheDir.length).replace(/\\/g, '/');
+      const ext = rel.substring(rel.lastIndexOf('.'));
+      const base = rel.substring(0, rel.lastIndexOf('.'));
+      // Generate _ld and _low variants
+      for (const suffix of ['_ld', '_low']) {
+        const altPath = `${base}${suffix}${ext}`;
+        if (!existsSync(join(cacheDir, altPath))) {
+          mobileAlternates.push({ path: altPath, url: `https://${this.targetHostname}${altPath}` });
+        }
+      }
+      // Generate mobile variant for desktop.mp4 → mobile.mp4
+      if (rel.includes('desktop.mp4')) {
+        const mobilePath = rel.replace('desktop.mp4', 'mobile.mp4');
+        if (!existsSync(join(cacheDir, mobilePath))) {
+          mobileAlternates.push({ path: mobilePath, url: `https://${this.targetHostname}${mobilePath}` });
+        }
+      }
+    }
+
+    // Also try external domains for mobile alternates
+    const extDomainsForDownload = [...extDomains].filter(d => !['vimeo.com', 'vimeocdn.com', 'twimg.com'].some(s => d.endsWith(s)));
+
+    if (mobileAlternates.length > 0) {
+      console.log(`[Crawler] Trying ${mobileAlternates.length} mobile/LD alternate assets...`);
+      for (let i = 0; i < mobileAlternates.length; i += 10) {
+        if (this.aborted) break;
+        const batch = mobileAlternates.slice(i, i + 10);
+        const results = await Promise.allSettled(
+          batch.map(async ({ path: assetPath, url }) => {
+            const cachePath = join(cacheDir, assetPath);
+            // Try target domain first, then external domains
+            const urls = [url, ...extDomainsForDownload.map(d => `https://${d}${assetPath}`)];
+            for (const tryUrl of urls) {
+              try {
+                const response = await context.request.get(tryUrl, { timeout: 10000 });
+                if (response.ok()) {
+                  const ct = response.headers()['content-type'] || '';
+                  if (ct.includes('text/html')) continue;
+                  const body = await response.body();
+                  if (body.length === 0) continue;
+                  const dir = dirname(cachePath);
+                  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+                  writeFileSync(cachePath, body);
+                  return true;
+                }
+              } catch { /* next url */ }
+            }
+            return false;
+          })
+        );
+        downloaded += results.filter(r => r.status === 'fulfilled' && r.value).length;
       }
     }
 
@@ -708,7 +808,7 @@ export class Crawler {
               assetPath = ref.split('?')[0].split('#')[0];
             } else {
               // Relative path — try both as-is (from site root) and relative to current file
-              const cleaned = ref.split('?')[0].split('#')[0];
+              const cleaned = ref.replace(/^\.\//, '').split('?')[0].split('#')[0];
               const fromRoot = `/${cleaned}`;
               const fromFile = `${relToCache}/${cleaned}`;
               // Prefer root-relative if it would avoid path duplication
@@ -794,7 +894,7 @@ export class Crawler {
     const targetPath = new URL(this.targetUrl).pathname.replace(/\/+$/, '') || '';
     const pwaFiles = [
       '/manifest.webmanifest', '/manifest.json', '/ngsw-worker.js', '/sw.js', '/service-worker.js',
-      '/favicon.ico', '/favicon-16x16.png', '/favicon-32x32.png',
+      '/favicon.ico', '/favicon-16x16.png', '/favicon-32x32.png', '/apple-touch-icon.png',
       `${targetPath}/manifest.webmanifest`, `${targetPath}/manifest.json`,
       `${targetPath}/ngsw-worker.js`, `${targetPath}/ngsw.json`,
     ];
@@ -849,20 +949,25 @@ export class Crawler {
         const results = await Promise.allSettled(
           batch.map(async (assetPath) => {
             const cachePath = join(cacheDir, assetPath);
-            const url = `https://${this.targetHostname}${assetPath}`;
             const ext = assetPath.substring(assetPath.lastIndexOf('.')).toLowerCase();
             const timeout = MEDIA_EXTS.has(ext) ? 30000 : 5000;
-            const response = await context.request.get(url, { timeout });
-            if (response.ok()) {
-              // Reject HTML responses — they're error/redirect pages, not real assets
-              const ct = response.headers()['content-type'] || '';
-              if (ct.includes('text/html')) return false;
-              const body = await response.body();
-              if (body.length === 0) return false;
-              const dir = dirname(cachePath);
-              if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-              writeFileSync(cachePath, body);
-              return true;
+            // Try target domain first, then external asset domains
+            const domains = [this.targetHostname, ...extDomains];
+            for (const domain of domains) {
+              try {
+                const url = `https://${domain}${assetPath}`;
+                const response = await context.request.get(url, { timeout });
+                if (response.ok()) {
+                  const ct = response.headers()['content-type'] || '';
+                  if (ct.includes('text/html')) continue; // HTML = error page, try next domain
+                  const body = await response.body();
+                  if (body.length === 0) continue;
+                  const dir = dirname(cachePath);
+                  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+                  writeFileSync(cachePath, body);
+                  return true;
+                }
+              } catch { /* try next domain */ }
             }
             return false;
           })

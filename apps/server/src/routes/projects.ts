@@ -314,18 +314,48 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
       '.mjs': 'babel',
     };
 
-    // Rewrite absolute URLs to the original domain → relative paths for local serving
+    // Collect external asset domains from cache metadata (skip third-party services)
+    const skipRewriteDomains = ['vimeo.com', 'vimeocdn.com', 'twimg.com', 'google-analytics.com', 'googletagmanager.com', 'cloudflare.com', 'facebook.net', 'twitter.com', 'google.com', 'gstatic.com', 'googleapis.com'];
+    const extDomains = new Set<string>();
+    const scanMeta = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fp = join(dir, entry.name);
+        if (entry.isDirectory()) scanMeta(fp);
+        else if (entry.name.endsWith('.meta.json')) {
+          try {
+            const meta = JSON.parse(readFileSync(fp, 'utf-8'));
+            if (meta.url) {
+              const h = new URL(meta.url).hostname;
+              if (h !== rawDomain && !h.endsWith('.' + rawDomain) && !skipRewriteDomains.some(d => h.endsWith(d))) {
+                extDomains.add(h);
+              }
+            }
+          } catch {}
+        }
+      }
+    };
+    scanMeta(cacheDir);
+
+    // Rewrite absolute URLs to the original domain AND external asset domains → relative paths
     const rewriteAbsoluteUrls = (content: string, domain: string): string => {
-      // Replace https://domain/path and http://domain/path with /path
+      let result = content;
+      // Rewrite target domain URLs
       const patterns = [
         new RegExp(`https?://${domain.replace(/\./g, '\\.')}(/[^"'\\s)>]*)`, 'gi'),
         new RegExp(`https?://${domain.replace(/\./g, '\\.')}(["'\\s)>])`, 'gi'),
       ];
-      let result = content;
-      // Full URLs with path: https://domain/path → /path
       result = result.replace(patterns[0], '$1');
-      // Domain-only URLs: https://domain" → /"
       result = result.replace(patterns[1], '/$1');
+      // Rewrite external asset domain URLs → /path (assets stored by pathname)
+      for (const extDomain of extDomains) {
+        const ep = [
+          new RegExp(`https?://${extDomain.replace(/\./g, '\\.')}(/[^"'\\s)>]*)`, 'gi'),
+          new RegExp(`https?://${extDomain.replace(/\./g, '\\.')}(["'\\s)>])`, 'gi'),
+        ];
+        result = result.replace(ep[0], '$1');
+        result = result.replace(ep[1], '/$1');
+      }
       return result;
     };
 
@@ -337,6 +367,8 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
         if (entry.isDirectory()) {
           // Skip npm package directories (e.g. zone.js/dist/)
           if (/^\w[\w.-]*\.\w+$/.test(entry.name) && !entry.name.startsWith('_')) continue;
+          // Skip junk directories from external CDNs (Vimeo playlist tokens, etc.)
+          if (entry.name.startsWith('exp=') || entry.name.startsWith('hmac=') || entry.name.startsWith('psid=')) continue;
           await walkAndAdd(fullPath, zipPath);
         } else if (!entry.name.endsWith('.meta.json')) {
           const ext = extname(entry.name).toLowerCase();
