@@ -66,6 +66,11 @@ export class Crawler {
           '--disable-blink-features=AutomationControlled',
           '--window-size=1920,1080',
           '--no-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-animations',
+          '--disable-translate',
+          '--no-first-run',
         ],
       });
 
@@ -73,10 +78,14 @@ export class Crawler {
       this.context = await this.browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         viewport: { width: 1920, height: 1080 },
+        serviceWorkers: 'block', // Block service workers — they slow down asset interception
       });
       await this.context.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => false });
       });
+
+      // Block analytics/tracking requests at context level — saves network time on every page
+      await this.context.route(/google-analytics\.com|googletagmanager\.com|facebook\.net|connect\.facebook\.com|doubleclick\.net|hotjar\.com|clarity\.ms/, route => route.abort());
 
       const queue = new CrawlQueue(this.maxDepth, this.targetHostname);
 
@@ -700,7 +709,7 @@ export class Crawler {
 
     if (mobileAlternates.length > 0) {
       console.log(`[Crawler] Trying ${mobileAlternates.length} mobile/LD alternate assets...`);
-      for (let i = 0; i < mobileAlternates.length; i += 10) {
+      for (let i = 0; i < mobileAlternates.length; i += 20) {
         if (this.aborted) break;
         const batch = mobileAlternates.slice(i, i + 10);
         const results = await Promise.allSettled(
@@ -941,7 +950,7 @@ export class Crawler {
       const otherFiles = toDownload.filter(p => !MEDIA_EXTS.has(p.substring(p.lastIndexOf('.')).toLowerCase()));
       // Download small assets first (batch of 10), then media (batch of 3)
       const orderedFiles = [...otherFiles, ...mediaFiles];
-      const BATCH_SIZE = 10;
+      const BATCH_SIZE = 20;
       for (let i = 0; i < orderedFiles.length; i += (i >= otherFiles.length ? 3 : BATCH_SIZE)) {
         if (this.aborted) break;
         const currentBatch = i >= otherFiles.length ? 3 : BATCH_SIZE;
