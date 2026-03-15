@@ -1197,7 +1197,7 @@ function isAssetUrl(url: string, contentType: string): boolean {
   const assetContentTypes = [
     'image/', 'video/', 'audio/', 'font/',
     'text/css', 'application/javascript', 'text/javascript',
-    'model/', 'application/octet-stream',
+    'model/', 'application/octet-stream', 'application/wasm',
   ];
   if (assetContentTypes.some((t) => contentType.startsWith(t))) return true;
 
@@ -1207,6 +1207,8 @@ function isAssetUrl(url: string, contentType: string): boolean {
     '.glb', '.gltf', '.obj', '.fbx', '.usdz', '.ktx', '.ktx2', '.basis', '.buf', '.exr', '.hdr',
     '.woff', '.woff2', '.ttf', '.otf',
     '.css', '.js', '.mjs', '.webmanifest', '.json',
+    '.wasm', '.mp3', '.wav', '.flac', '.aac',
+    '.dds', '.pvr', '.splinecode',
   ];
   try {
     const pathname = new URL(url).pathname.toLowerCase();
