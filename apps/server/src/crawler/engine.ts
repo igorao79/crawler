@@ -9,7 +9,7 @@ import { extractPageData, type ExtractedData } from './extractor.js';
 import { collectAssets, deduplicateAssets, classifyAssetUrl } from './asset-collector.js';
 import type { DrizzleDB } from '../db/client.js';
 import * as schema from '../db/schema.js';
-import type { CrawlProgress, CrawlStatus } from '@lusion-crawler/shared';
+import type { CrawlProgress, CrawlStatus, CdnWarning } from '@lusion-crawler/shared';
 
 const DELAY_MS = 200; // Short delay between requests
 const PAGE_TIMEOUT = 60000; // 60s for heavy SPA sites
@@ -33,6 +33,7 @@ export class Crawler {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private aborted = false;
+  private cdnAssets = new Map<string, Set<string>>(); // domain -> set of file paths
 
   constructor(
     db: DrizzleDB,
@@ -68,7 +69,8 @@ export class Crawler {
           '--window-size=1920,1080',
           '--no-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-gpu',
+          '--use-gl=egl',
+          '--enable-webgl',
           '--disable-animations',
           '--disable-translate',
           '--no-first-run',
@@ -291,7 +293,10 @@ export class Crawler {
 
       // Intercept network responses — cache assets from external domains (e.g. lusion.dev for lusion.co)
       // Assets from the target domain are already cached by the proxy
-      const skipDomains = ['google-analytics.com', 'googletagmanager.com', 'cloudflare.com', 'facebook.net', 'twitter.com', 'doubleclick.net', 'google.com', 'gstatic.com', 'googleapis.com', 'vimeo.com', 'vimeocdn.com', 'twimg.com'];
+      // Only skip pure analytics/tracking — NOT font CDNs or asset CDNs
+      const skipDomains = ['google-analytics.com', 'googletagmanager.com', 'facebook.net', 'doubleclick.net', 'hotjar.com', 'clarity.ms', 'sentry.io', 'segment.com', 'mixpanel.com', 'amplitude.com'];
+      // CDN domains to cache but not warn about (fonts, common CDNs)
+      const silentCdnDomains = ['fonts.googleapis.com', 'fonts.gstatic.com'];
       page.on('response', async (response) => {
         const resUrl = response.url();
         const contentType = response.headers()['content-type'] ?? '';
@@ -304,9 +309,17 @@ export class Crawler {
             const isAsset = isAssetUrl(resUrl, contentType);
             const isSkipped = skipDomains.some(d => hostname.endsWith(d));
 
-            // Cache external domain assets into the same cache dir (same pathname)
-            // Proxy already handles target domain caching
-            if (!isTargetDomain && isAsset && !isSkipped) {
+            const isSilentCdn = silentCdnDomains.some(d => hostname.endsWith(d));
+
+            // Track CDN/external domain assets for warnings (skip silent CDNs like fonts)
+            if (!isTargetDomain && !isSkipped && !isSilentCdn && isAsset) {
+              const files = this.cdnAssets.get(hostname) || new Set();
+              files.add(parsed.pathname);
+              this.cdnAssets.set(hostname, files);
+            }
+
+            // Cache ALL non-skipped assets (both target domain, external, and silent CDNs)
+            if ((isTargetDomain || isAsset) && !isSkipped) {
               let safePath = parsed.pathname.replace(/[?#].*$/, '');
               if (safePath.endsWith('/') || safePath === '') safePath += 'index.html';
               const lastSeg = safePath.split('/').pop() || '';
@@ -330,9 +343,8 @@ export class Crawler {
       });
 
       try {
-        // Navigate through proxy so all relative assets get cached automatically
-        const proxyPageUrl = url.replace(new URL(url).origin, PROXY_URL);
-        await page.goto(proxyPageUrl, {
+        // Navigate directly to the real URL — response handler caches everything
+        await page.goto(url, {
           waitUntil: 'load',
           timeout: PAGE_TIMEOUT,
         });
@@ -473,6 +485,47 @@ export class Crawler {
     }
   }
 
+  // Known CDN frameworks detection
+  private static CDN_FRAMEWORKS: Array<{ pattern: RegExp; name: string }> = [
+    { pattern: /three(\.module)?\.(?:min\.)?js/i, name: 'Three.js' },
+    { pattern: /spline.*runtime/i, name: 'Spline 3D' },
+    { pattern: /gsap|ScrollTrigger|DrawSVG/i, name: 'GSAP' },
+    { pattern: /pixi(\.min)?\.js/i, name: 'PixiJS' },
+    { pattern: /babylon(\.min)?\.js/i, name: 'Babylon.js' },
+    { pattern: /aframe(\.min)?\.js/i, name: 'A-Frame' },
+    { pattern: /p5(\.min)?\.js/i, name: 'p5.js' },
+    { pattern: /lottie/i, name: 'Lottie' },
+    { pattern: /model-viewer/i, name: 'Model Viewer' },
+    { pattern: /playcanvas/i, name: 'PlayCanvas' },
+    { pattern: /\.splinecode$/i, name: 'Spline 3D' },
+    { pattern: /\.glb$|\.gltf$/i, name: '3D Model' },
+    { pattern: /\.hdr$|\.exr$/i, name: 'HDR Environment' },
+  ];
+
+  private buildCdnWarnings(): CdnWarning[] {
+    const warnings: CdnWarning[] = [];
+    for (const [domain, files] of this.cdnAssets) {
+      let framework: string | null = null;
+      const fileList = [...files];
+      // Detect framework from file names
+      for (const file of fileList) {
+        for (const { pattern, name } of Crawler.CDN_FRAMEWORKS) {
+          if (pattern.test(file)) {
+            framework = name;
+            break;
+          }
+        }
+        if (framework) break;
+      }
+      warnings.push({
+        domain,
+        files: fileList.slice(0, 20), // Limit to 20 files per domain
+        framework,
+      });
+    }
+    return warnings;
+  }
+
   private emitProgress(parsed: number, total: number, currentUrl: string, status: CrawlStatus): void {
     if (this.onProgress) {
       this.onProgress({
@@ -481,6 +534,7 @@ export class Crawler {
         total,
         currentUrl,
         status,
+        cdnWarnings: this.cdnAssets.size > 0 ? this.buildCdnWarnings() : undefined,
       });
     }
   }
@@ -847,11 +901,16 @@ export class Crawler {
                 assetPath = '/' + resolved.join('/');
               } else {
                 const fromRoot = `/${cleaned}`;
-                const fromFile = `${relToCache}/${cleaned}`;
-                // Prefer root-relative if it would avoid path duplication
-                assetPath = fromRoot;
-                if (existsSync(join(cacheDir, fromFile)) || !cleaned.includes('/')) {
+                const fromFile = relToCache ? `${relToCache}/${cleaned}` : `/${cleaned}`;
+                // For HTML/CSS files, prefer file-relative resolution (standard browser behavior)
+                // For JS files, prefer root-relative (bundlers usually use absolute paths)
+                if (isHtml || isCss) {
                   assetPath = fromFile;
+                } else {
+                  assetPath = fromRoot;
+                  if (existsSync(join(cacheDir, fromFile)) || !cleaned.includes('/')) {
+                    assetPath = fromFile;
+                  }
                 }
               }
               // Track bare filenames for cross-file prefix matching

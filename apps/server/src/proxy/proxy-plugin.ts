@@ -110,10 +110,18 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
 
   const fullUrl = `${target}${url}`;
 
-  // Check cache
-  const cachePath = url.includes('?')
-    ? getQueryCachePath(fullUrl, target) || getCachePath(url)
-    : getCachePath(url);
+  // Check cache — try query-specific cache first, then fall back to base path
+  let cachePath: string;
+  if (url.includes('?')) {
+    const queryPath = getQueryCachePath(fullUrl, target);
+    if (queryPath && existsSync(queryPath)) {
+      cachePath = queryPath;
+    } else {
+      cachePath = getCachePath(url);
+    }
+  } else {
+    cachePath = getCachePath(url);
+  }
   const metaPath = getMetaPath(cachePath);
 
   if (existsSync(cachePath) && existsSync(metaPath)) {
@@ -126,6 +134,7 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
     reply.header('content-type', contentType);
     reply.header('x-proxy-cache', 'HIT');
     reply.removeHeader('content-security-policy');
+    reply.removeHeader('set-cookie');
 
     if (contentType.includes('text/html')) {
       return reply.send(rewriteHtml(body.toString('utf-8')));
@@ -182,6 +191,7 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
     reply.header('content-type', contentType);
     reply.header('x-proxy-cache', 'MISS');
     reply.removeHeader('content-security-policy');
+    reply.removeHeader('set-cookie');
 
     if (contentType.includes('text/html')) {
       return reply.send(rewriteHtml(buffer.toString('utf-8')));

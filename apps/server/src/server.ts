@@ -20,7 +20,13 @@ declare module 'fastify' {
 }
 
 async function buildServer() {
-  const fastify = Fastify({ logger: true });
+  const fastify = Fastify({
+    logger: true,
+    maxParamLength: 5000,
+  });
+
+  // Increase HTTP header size limit (default 16KB too small for sites with many cookies)
+  fastify.server.maxHeaderSize = 65536;
 
   // Database
   const db = getDatabase();

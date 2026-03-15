@@ -88,12 +88,19 @@ export interface PageInfo {
 
 // ===== WebSocket Progress =====
 
+export interface CdnWarning {
+  domain: string;
+  files: string[];
+  framework: string | null; // e.g. "Three.js", "Spline", "GSAP"
+}
+
 export interface CrawlProgress {
   jobId: string;
   parsed: number;
   total: number;
   currentUrl: string;
   status: CrawlStatus;
+  cdnWarnings?: CdnWarning[];
 }
 
 // ===== API Responses =====

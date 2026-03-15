@@ -2,12 +2,19 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 
+interface CdnWarning {
+  domain: string;
+  files: string[];
+  framework: string | null;
+}
+
 interface CrawlProgress {
   jobId: string;
   parsed: number;
   total: number;
   currentUrl: string;
   status: string;
+  cdnWarnings?: CdnWarning[];
 }
 
 const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:3001";

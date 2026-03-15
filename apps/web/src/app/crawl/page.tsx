@@ -234,6 +234,46 @@ export default function CrawlPage() {
             )}
           </div>
 
+          {/* CDN Warnings */}
+          {progress?.cdnWarnings && progress.cdnWarnings.length > 0 && (
+            <div className="rounded-xl bg-amber-500/[0.06] border border-amber-500/20 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-400">
+                  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+                <span className="text-xs font-semibold text-amber-400 uppercase tracking-wider">
+                  External CDN Assets Detected
+                </span>
+              </div>
+              <p className="text-xs text-amber-200/60">
+                These files are loaded from external CDNs and are cached locally. Some may require the original server to function.
+              </p>
+              {progress.cdnWarnings.map((w, i) => (
+                <div key={i} className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono text-amber-300/80">{w.domain}</span>
+                    {w.framework && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-medium">
+                        {w.framework}
+                      </span>
+                    )}
+                    <span className="text-[10px] text-amber-200/40">{w.files.length} file{w.files.length > 1 ? 's' : ''}</span>
+                  </div>
+                  <div className="pl-3 space-y-0.5">
+                    {w.files.slice(0, 5).map((f, j) => (
+                      <div key={j} className="text-[11px] font-mono text-amber-200/40 truncate">{f}</div>
+                    ))}
+                    {w.files.length > 5 && (
+                      <div className="text-[10px] text-amber-200/30">+{w.files.length - 5} more</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Download */}
           {isDone && (
             <a
