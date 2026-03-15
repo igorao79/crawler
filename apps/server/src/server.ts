@@ -26,8 +26,8 @@ async function buildServer() {
   const db = getDatabase();
   fastify.decorate('db', db);
 
-  // CORS — allow all origins (needed for ngrok/Vercel/etc)
-  // Use origin: '*' (not true) to avoid duplicate header when ngrok also adds Access-Control-Allow-Origin: *
+  // CORS — allow all origins
+  // When using ngrok, run WITHOUT --response-header-add flags to avoid duplicate CORS headers
   await fastify.register(cors, {
     origin: '*',
     methods: ['GET', 'POST', 'DELETE', 'PUT', 'PATCH', 'OPTIONS'],

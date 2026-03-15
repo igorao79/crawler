@@ -718,30 +718,27 @@ export class Crawler {
     const extDomainsForDownload = [...extDomains].filter(d => !['vimeo.com', 'vimeocdn.com', 'twimg.com'].some(s => d.endsWith(s)));
 
     if (mobileAlternates.length > 0) {
-      console.log(`[Crawler] Trying ${mobileAlternates.length} mobile/LD alternate assets...`);
+      console.log(`[Crawler] Trying ${mobileAlternates.length} mobile/LD alternate assets (target domain only)...`);
       for (let i = 0; i < mobileAlternates.length; i += 20) {
         if (this.aborted) break;
-        const batch = mobileAlternates.slice(i, i + 10);
+        const batch = mobileAlternates.slice(i, i + 20);
         const results = await Promise.allSettled(
           batch.map(async ({ path: assetPath, url }) => {
             const cachePath = join(cacheDir, assetPath);
-            // Try target domain first, then external domains
-            const urls = [url, ...extDomainsForDownload.map(d => `https://${d}${assetPath}`)];
-            for (const tryUrl of urls) {
-              try {
-                const response = await context.request.get(tryUrl, { timeout: 10000 });
-                if (response.ok()) {
-                  const ct = response.headers()['content-type'] || '';
-                  if (ct.includes('text/html')) continue;
-                  const body = await response.body();
-                  if (body.length === 0) continue;
-                  const dir = dirname(cachePath);
-                  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-                  writeFileSync(cachePath, body);
-                  return true;
-                }
-              } catch { /* next url */ }
-            }
+            // Only try target domain (external domain iteration causes massive slowdown)
+            try {
+              const response = await context.request.get(url, { timeout: 5000 });
+              if (response.ok()) {
+                const ct = response.headers()['content-type'] || '';
+                if (ct.includes('text/html')) return false;
+                const body = await response.body();
+                if (body.length === 0) return false;
+                const dir = dirname(cachePath);
+                if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+                writeFileSync(cachePath, body);
+                return true;
+              }
+            } catch { /* skip */ }
             return false;
           })
         );
