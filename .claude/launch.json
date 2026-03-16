@@ -18,6 +18,12 @@
       "port": 3000,
       "autoPort": true,
       "cwd": "apps/web"
+    },
+    {
+      "name": "audit-planetono",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["audit-server-notimeout.js", "apps/server/proxy-cache/www.planetono.space"],
+      "port": 5555
     }
   ]
 }

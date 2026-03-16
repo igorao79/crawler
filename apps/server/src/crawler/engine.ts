@@ -1,6 +1,10 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { existsSync, mkdirSync, writeFileSync, readdirSync, statSync, readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+
+const __engine_dirname = dirname(fileURLToPath(import.meta.url));
+const PROXY_CACHE_DIR = resolve(__engine_dirname, '../../proxy-cache');
 import { setProxyCookies } from '../proxy/proxy-plugin.js';
 import { v4 as uuidv4 } from 'uuid';
 import { eq } from 'drizzle-orm';
@@ -288,7 +292,7 @@ export class Crawler {
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       const page = await this.context.newPage();
       const networkAssets: NetworkAsset[] = [];
-      const cacheDir = join('./proxy-cache', this.targetHostname);
+      const cacheDir = join(PROXY_CACHE_DIR, this.targetHostname);
       if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
 
       // Intercept network responses — cache assets from external domains (e.g. lusion.dev for lusion.co)
@@ -343,8 +347,9 @@ export class Crawler {
       });
 
       try {
-        // Navigate directly to the real URL — response handler caches everything
-        await page.goto(url, {
+        // Navigate through proxy so all relative assets get cached automatically
+        const proxyPageUrl = url.replace(new URL(url).origin, PROXY_URL);
+        await page.goto(proxyPageUrl, {
           waitUntil: 'load',
           timeout: PAGE_TIMEOUT,
         });
@@ -667,7 +672,7 @@ export class Crawler {
    * 2. Common files browsers request but don't trigger response events for (webmanifest, favicons)
    */
   private async downloadMissingAssets(): Promise<void> {
-    const cacheDir = join('./proxy-cache', this.targetHostname);
+    const cacheDir = join(PROXY_CACHE_DIR, this.targetHostname);
     if (!existsSync(cacheDir)) return;
     if (!this.browser) return;
 
@@ -697,35 +702,145 @@ export class Crawler {
       console.log(`[Crawler] Found external asset domains: ${[...extDomains].join(', ')}`);
     }
 
-    // 1. Download DXT alternates for ASTC textures
-    const astcFiles: string[] = [];
-    const findAstc = (dir: string) => {
+    // 1. Download texture format alternates (ASTC↔DXT↔S3TC↔ETC)
+    // Sites store compressed textures in format-specific dirs: /compressed/astc/, /compressed/s3tc/, etc.
+    const TEXTURE_FORMATS = ['astc', 's3tc', 'dxt', 'etc', 'etc1', 'pvrtc'];
+    const ktxFiles: string[] = [];
+    const findKtx = (dir: string) => {
       if (!existsSync(dir)) return;
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const fullPath = join(dir, entry.name);
-        if (entry.isDirectory()) findAstc(fullPath);
-        else if (entry.name.endsWith('-astc.ktx')) astcFiles.push(fullPath);
+        if (entry.isDirectory()) findKtx(fullPath);
+        else if (entry.name.endsWith('.ktx') || entry.name.endsWith('.ktx2')) ktxFiles.push(fullPath);
       }
     };
-    findAstc(cacheDir);
+    findKtx(cacheDir);
 
-    if (astcFiles.length > 0) {
-      console.log(`[Crawler] Found ${astcFiles.length} ASTC textures, downloading DXT alternates...`);
-      for (const astcPath of astcFiles) {
-        const dxtPath = astcPath.replace('-astc.ktx', '-dxt.ktx');
-        if (existsSync(dxtPath)) continue;
-        const relativePath = astcPath.substring(cacheDir.length).replace(/\\/g, '/');
-        const dxtUrl = `https://${this.targetHostname}${relativePath.replace('-astc.ktx', '-dxt.ktx')}`;
-        try {
-          const response = await context.request.get(dxtUrl);
-          if (response.ok()) {
-            const body = await response.body();
-            const dir = dirname(dxtPath);
-            if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-            writeFileSync(dxtPath, body);
-            downloaded++;
+    // a) Suffix-based alternates: file-astc.ktx → file-dxt.ktx, file-s3tc.ktx, etc.
+    const suffixKtx = ktxFiles.filter(f => TEXTURE_FORMATS.some(fmt => f.includes(`-${fmt}.ktx`)));
+    if (suffixKtx.length > 0) {
+      console.log(`[Crawler] Found ${suffixKtx.length} suffix-format textures, downloading alternates...`);
+      for (const filePath of suffixKtx) {
+        const currentFmt = TEXTURE_FORMATS.find(fmt => filePath.includes(`-${fmt}.ktx`))!;
+        for (const altFmt of TEXTURE_FORMATS) {
+          if (altFmt === currentFmt) continue;
+          const altPath = filePath.replace(`-${currentFmt}.ktx`, `-${altFmt}.ktx`);
+          if (existsSync(altPath)) continue;
+          const relativePath = altPath.substring(cacheDir.length).replace(/\\/g, '/');
+          try {
+            const response = await context.request.get(`https://${this.targetHostname}${relativePath}`, { timeout: 120000 });
+            if (response.ok()) {
+              const body = await response.body();
+              const dir = dirname(altPath);
+              if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+              writeFileSync(altPath, body);
+              downloaded++;
+            }
+          } catch { /* skip */ }
+        }
+        if (this.aborted) break;
+      }
+    }
+
+    // b) Directory-based alternates: /compressed/astc/file.ktx → /compressed/s3tc/file.ktx
+    const dirBasedKtx = ktxFiles.filter(f => {
+      const rel = f.substring(cacheDir.length).replace(/\\/g, '/');
+      return TEXTURE_FORMATS.some(fmt => rel.includes(`/${fmt}/`));
+    });
+    if (dirBasedKtx.length > 0) {
+      const seen = new Set<string>();
+      console.log(`[Crawler] Found ${dirBasedKtx.length} directory-format textures, downloading alternates...`);
+      for (const filePath of dirBasedKtx) {
+        const rel = filePath.substring(cacheDir.length).replace(/\\/g, '/');
+        const currentFmt = TEXTURE_FORMATS.find(fmt => rel.includes(`/${fmt}/`))!;
+        for (const altFmt of TEXTURE_FORMATS) {
+          if (altFmt === currentFmt) continue;
+          const altRel = rel.replace(`/${currentFmt}/`, `/${altFmt}/`);
+          if (seen.has(altRel)) continue;
+          seen.add(altRel);
+          const altPath = join(cacheDir, altRel);
+          if (existsSync(altPath)) continue;
+          try {
+            const response = await context.request.get(`https://${this.targetHostname}${altRel}`, { timeout: 120000 });
+            if (response.ok()) {
+              // Skip content-type check for KTX/texture files — S3 often misconfigures MIME types
+              const body = await response.body();
+              if (body.length === 0) continue;
+              const dir = dirname(altPath);
+              if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+              writeFileSync(altPath, body);
+              downloaded++;
+            }
+          } catch { /* skip */ }
+        }
+        if (this.aborted) break;
+      }
+    }
+
+    // c) Quality/variant suffixes for KTX textures: file.ktx → file_flat@mipmaps.ktx, file_pot@mipmaps.ktx, etc.
+    const KTX_SUFFIXES = ['_flat@mipmaps', '_pot@mipmaps', '_low@mipmaps', '_hd@mipmaps'];
+    // Refresh KTX file list after format alternates download
+    const allKtxNow: string[] = [];
+    const findKtxAll = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fp = join(dir, entry.name);
+        if (entry.isDirectory()) findKtxAll(fp);
+        else if (entry.name.endsWith('.ktx') || entry.name.endsWith('.ktx2')) allKtxNow.push(fp);
+      }
+    };
+    findKtxAll(cacheDir);
+
+    console.log(`[Crawler] Found ${allKtxNow.length} KTX textures for quality variant probing`);
+    if (allKtxNow.length > 0) {
+      // Deduplicate: only try suffix variants for base textures (not already suffixed)
+      const basesForSuffix = allKtxNow.filter(f => !KTX_SUFFIXES.some(s => f.includes(s)));
+      const suffixTasks: Array<{ path: string; url: string }> = [];
+      for (const filePath of basesForSuffix) {
+        const rel = filePath.substring(cacheDir.length).replace(/\\/g, '/');
+        const ext = rel.endsWith('.ktx2') ? '.ktx2' : '.ktx';
+        let base = rel.substring(0, rel.length - ext.length);
+        // Strip existing @mipmaps suffix so we get file_flat@mipmaps.ktx, not file@mipmaps_flat@mipmaps.ktx
+        base = base.replace(/@mipmaps$/, '');
+        for (const suffix of KTX_SUFFIXES) {
+          const altRel = `${base}${suffix}${ext}`;
+          const altPath = join(cacheDir, altRel);
+          if (!existsSync(altPath)) {
+            suffixTasks.push({ path: altRel, url: `https://${this.targetHostname}${altRel}` });
           }
-        } catch { /* skip */ }
+        }
+      }
+      console.log(`[Crawler] ${basesForSuffix.length} base KTX textures → ${suffixTasks.length} suffix variants to try`);
+      if (suffixTasks.length > 0) {
+        console.log(`[Crawler] Trying ${suffixTasks.length} KTX quality variants (_flat, _pot, _low, _hd)...`);
+        for (let i = 0; i < suffixTasks.length; i += 20) {
+          if (this.aborted) break;
+          const batch = suffixTasks.slice(i, i + 20);
+          const results = await Promise.allSettled(
+            batch.map(async ({ path: assetPath, url }) => {
+              try {
+                const response = await context.request.get(url, { timeout: 120000 });
+                if (i === 0) console.log(`[Crawler] KTX suffix probe: ${url} → status ${response.status()}`);
+                if (response.ok()) {
+                  // Skip content-type check for KTX — some servers (S3) misconfigure MIME types
+                  const body = await response.body();
+                  if (body.length === 0) return false;
+                  const cachePath = join(cacheDir, assetPath);
+                  const dir = dirname(cachePath);
+                  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+                  writeFileSync(cachePath, body);
+                  return true;
+                }
+              } catch (err) {
+                  console.log(`[Crawler] KTX suffix fetch error for ${url}: ${err instanceof Error ? err.message : err}`);
+              }
+              return false;
+            })
+          );
+          const batchOk = results.filter(r => r.status === 'fulfilled' && r.value).length;
+          downloaded += batchOk;
+          if (i === 0) console.log(`[Crawler] First KTX suffix batch: ${batchOk}/${batch.length} ok, sample URL: ${batch[0]?.url}`);
+        }
       }
     }
 
@@ -781,7 +896,7 @@ export class Crawler {
             const cachePath = join(cacheDir, assetPath);
             // Only try target domain (external domain iteration causes massive slowdown)
             try {
-              const response = await context.request.get(url, { timeout: 5000 });
+              const response = await context.request.get(url, { timeout: 120000 });
               if (response.ok()) {
                 const ct = response.headers()['content-type'] || '';
                 if (ct.includes('text/html')) return false;
@@ -833,6 +948,8 @@ export class Crawler {
     // Global collections: prefixes and bare filenames across ALL files
     const globalPrefixes = new Set<string>();
     const globalBareFilenames = new Set<string>();
+    // Cross-origin CMS domains found in _ipx URLs (e.g. admin.example.com from /_ipx/.../https://admin.example.com/uploads/...)
+    const cmsOrigins = new Map<string, string>(); // path prefix → full origin URL (e.g. "/uploads/" → "https://admin.example.com")
 
     // First pass: collect path prefixes from all JS files
     // Matches both string concat ("path/" +) and template literals (`path/${`)
@@ -871,8 +988,12 @@ export class Crawler {
           pattern.lastIndex = 0;
           let match;
           while ((match = pattern.exec(content)) !== null) {
-            const ref = match[1];
+            let ref = match[1];
             if (!ref || ref.startsWith('data:') || ref.startsWith('javascript:') || ref.startsWith('#') || ref.startsWith('mailto:') || ref.length > 300) continue;
+            // Decode HTML entities (e.g. &amp; → &) since we extract from raw HTML source
+            if (isHtml) {
+              ref = ref.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+            }
             // Skip obvious non-path strings (but allow spaces in media file paths)
             if (ref.includes('{') || ref.includes('}')) continue;
             if (ref.includes(' ') && !/\.(?:mp3|mp4|ogg|wav|webm|glb|gltf|fbx|obj|ktx2?|exr|hdr|png|jpe?g|webp|gif|svg|avif|wasm|woff2?|ttf)$/i.test(ref)) continue;
@@ -886,6 +1007,16 @@ export class Crawler {
               } catch { continue; }
             } else if (ref.startsWith('/')) {
               assetPath = ref.split('?')[0].split('#')[0];
+              // Detect cross-origin CMS domains in _ipx URLs (Nuxt image proxy)
+              // e.g. /_ipx/.../https://admin.example.com/uploads/file.jpg
+              if (isHtml && assetPath.includes('/_ipx/') && assetPath.includes('https://')) {
+                const ipxMatch = assetPath.match(/\/https?:\/\/([^/]+)(\/[^/]+\/)/);
+                if (ipxMatch && ipxMatch[1] !== this.targetHostname) {
+                  const cmsHost = ipxMatch[1];
+                  const pathPrefix = ipxMatch[2]; // e.g. "/uploads/"
+                  cmsOrigins.set(pathPrefix, `https://${cmsHost}`);
+                }
+              }
             } else {
               // Relative path — resolve relative to current file's directory
               const cleaned = ref.split('?')[0].split('#')[0];
@@ -929,14 +1060,16 @@ export class Crawler {
           }
         }
 
-        // Try bare filenames with ALL discovered path prefixes across files
-        // (e.g., '/videos/' found in file A + 'ponpon-mania.mp4' found in file B)
-        for (const prefix of globalPrefixes) {
-          for (const fname of globalBareFilenames) {
-            const prefixedPath = `${prefix}${fname}`;
-            const cachePath = join(cacheDir, prefixedPath);
-            if (!existsSync(cachePath)) {
-              missingUrls.add(prefixedPath);
+        // Try bare filenames with discovered path prefixes (limited to avoid combinatorial explosion)
+        // Only combine if total combinations < 500
+        if (globalPrefixes.size * globalBareFilenames.size < 500) {
+          for (const prefix of globalPrefixes) {
+            for (const fname of globalBareFilenames) {
+              const prefixedPath = `${prefix}${fname}`;
+              const cachePath = join(cacheDir, prefixedPath);
+              if (!existsSync(cachePath)) {
+                missingUrls.add(prefixedPath);
+              }
             }
           }
         }
@@ -987,6 +1120,54 @@ export class Crawler {
             const assetPath = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
             const cachePath = join(cacheDir, assetPath);
             if (!existsSync(cachePath)) missingUrls.add(assetPath);
+          }
+
+          // Handle extensionless data-filename with data-type (e.g. lusion.co project pages)
+          // <div data-filename="/assets/projects/foo/image1" data-type="image">
+          // JS appends .webp for images, .mp4 for videos at runtime
+          const dataFilenamePattern = /data-filename=["']([^"']+)["'][^>]*data-type=["'](image|video)["']/g;
+          const dataFilenamePatternRev = /data-type=["'](image|video)["'][^>]*data-filename=["']([^"']+)["']/g;
+          let dfm;
+          dataFilenamePattern.lastIndex = 0;
+          while ((dfm = dataFilenamePattern.exec(content)) !== null) {
+            const basePath = dfm[1];
+            const type = dfm[2];
+            const ext = type === 'video' ? '.mp4' : '.webp';
+            const assetPath = basePath.startsWith('/') ? basePath + ext : '/' + basePath + ext;
+            if (!existsSync(join(cacheDir, assetPath))) missingUrls.add(assetPath);
+          }
+          dataFilenamePatternRev.lastIndex = 0;
+          while ((dfm = dataFilenamePatternRev.exec(content)) !== null) {
+            const type = dfm[1];
+            const basePath = dfm[2];
+            const ext = type === 'video' ? '.mp4' : '.webp';
+            const assetPath = basePath.startsWith('/') ? basePath + ext : '/' + basePath + ext;
+            if (!existsSync(join(cacheDir, assetPath))) missingUrls.add(assetPath);
+          }
+        }
+
+        // Scan for string concat patterns: "path/" + var + ".ext" where var can be "m" or "d" (mobile/desktop)
+        // Also handles inline scripts in HTML
+        if (isHtml || (!isJson && !isCss)) {
+          // Pattern: "/path/" + var + ".ext?" or "/path/" + var + ".ext"
+          const concatPathPattern = /["'](\/[a-zA-Z0-9_/-]+\/)["']\s*\+\s*(\w+)\s*\+\s*["'](\.\w{2,6}(?:\?[^"']*)?)["']/g;
+          concatPathPattern.lastIndex = 0;
+          let cpm;
+          while ((cpm = concatPathPattern.exec(content)) !== null) {
+            const prefix = cpm[1];
+            const varName = cpm[2];
+            const suffix = cpm[3].split('?')[0]; // strip query params
+            // Find possible values for varName in same file
+            const valPat = new RegExp(`(?:["'])([a-zA-Z0-9_-]{1,20})(?:["'])\\s*(?::|===?\\s*${varName}|${varName}\\s*===?)`, 'g');
+            let vm;
+            const vals = new Set<string>();
+            while ((vm = valPat.exec(content)) !== null) vals.add(vm[1]);
+            // Also try common mobile/desktop variants
+            vals.add('m'); vals.add('d');
+            for (const val of vals) {
+              const assetPath = `${prefix}${val}${suffix}`;
+              if (!existsSync(join(cacheDir, assetPath))) missingUrls.add(assetPath);
+            }
           }
         }
 
@@ -1054,11 +1235,18 @@ export class Crawler {
       return true;
     });
 
+    if (cmsOrigins.size > 0) {
+      console.log(`[Crawler] Detected CMS origins: ${[...cmsOrigins.entries()].map(([p, o]) => `${p} → ${o}`).join(', ')}`);
+    }
+
     if (filtered.length > 0) {
       const toDownload = filtered;
       console.log(`[Crawler] Downloading ${toDownload.length} missing assets...`);
+      // Log first 10 missing URLs for debugging
+      for (const u of toDownload.slice(0, 10)) console.log(`[Crawler]   missing: ${u.substring(0, 150)}`);
       let assetsDone = 0;
       const assetsTotal = toDownload.length;
+      const dlStart = Date.now();
 
       // Separate media (large) and other (small) assets for different batch sizes
       const MEDIA_EXTS = new Set(['.mp4', '.webm', '.mp3', '.ogg', '.wav', '.glb', '.gltf', '.obj', '.fbx', '.hdr', '.ktx', '.ktx2', '.exr', '.wasm', '.basis']);
@@ -1067,38 +1255,66 @@ export class Crawler {
       // Download small assets first (batch of 10), then media (batch of 3)
       const orderedFiles = [...otherFiles, ...mediaFiles];
       const BATCH_SIZE = 20;
-      for (let i = 0; i < orderedFiles.length; i += (i >= otherFiles.length ? 3 : BATCH_SIZE)) {
+      for (let i = 0; i < orderedFiles.length; i += (i >= otherFiles.length ? 10 : BATCH_SIZE)) {
         if (this.aborted) break;
-        const currentBatch = i >= otherFiles.length ? 3 : BATCH_SIZE;
+        const currentBatch = i >= otherFiles.length ? 10 : BATCH_SIZE;
         const batch = orderedFiles.slice(i, i + currentBatch);
         const results = await Promise.allSettled(
           batch.map(async (assetPath) => {
             // Handle paths with spaces — encode for URL, keep original for cache
             const encodedPath = assetPath.split('/').map(seg => encodeURIComponent(decodeURIComponent(seg))).join('/');
             const cachePath = join(cacheDir, encodedPath);
-            const ext = assetPath.substring(assetPath.lastIndexOf('.')).toLowerCase();
-            const timeout = MEDIA_EXTS.has(ext) ? 15000 : 3000;
             const url = `https://${this.targetHostname}${encodedPath}`;
             try {
-              const response = await context.request.get(url, { timeout });
+              const response = await context.request.get(url, { timeout: 120000 });
               if (response.ok()) {
                 const ct = response.headers()['content-type'] || '';
                 // Skip HTML responses for non-.html files (SPA fallback pages)
                 // But allow actual .html files (e.g. portfolio fragments loaded via AJAX)
-                if (ct.includes('text/html') && !assetPath.endsWith('.html')) return false;
+                if (ct.includes('text/html') && !assetPath.endsWith('.html')) {
+                  console.log(`[Crawler] SKIP (html fallback): ${assetPath.substring(0, 120)}`);
+                  // If target returned HTML fallback, try cross-origin CMS domain (e.g. Strapi uploads)
+                  for (const [prefix, origin] of cmsOrigins) {
+                    if (assetPath.startsWith(prefix)) {
+                      try {
+                        const cmsUrl = `${origin}${encodedPath}`;
+                        const cmsResp = await context.request.get(cmsUrl, { timeout: 120000 });
+                        if (cmsResp.ok()) {
+                          const cmsCt = cmsResp.headers()['content-type'] || '';
+                          if (!cmsCt.includes('text/html')) {
+                            const body = await cmsResp.body();
+                            if (body.length > 0) {
+                              const dir = dirname(cachePath);
+                              if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+                              writeFileSync(cachePath, body);
+                              return true;
+                            }
+                          }
+                        }
+                      } catch {}
+                    }
+                  }
+                  return false;
+                }
                 const body = await response.body();
                 if (body.length === 0) return false;
                 const dir = dirname(cachePath);
                 if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
                 writeFileSync(cachePath, body);
                 return true;
+              } else {
+                console.log(`[Crawler] SKIP (status ${response.status()}): ${assetPath.substring(0, 120)}`);
               }
-            } catch { /* skip */ }
+            } catch (err) {
+              console.log(`[Crawler] FAIL (${err instanceof Error ? err.message.substring(0, 60) : 'error'}): ${assetPath.substring(0, 120)}`);
+            }
             return false;
           })
         );
         downloaded += results.filter(r => r.status === 'fulfilled' && r.value).length;
         assetsDone += batch.length;
+        const elapsed = ((Date.now() - dlStart) / 1000).toFixed(0);
+        console.log(`[Crawler] Assets ${assetsDone}/${assetsTotal} (${downloaded} ok, ${elapsed}s elapsed)`);
         this.emitProgress(assetsDone, assetsTotal, `Downloading assets... (${assetsDone}/${assetsTotal})`, 'running');
       }
     }
@@ -1158,7 +1374,7 @@ export class Crawler {
               const cachePath = join(cacheDir, encodedPath);
               const url = `https://${this.targetHostname}${encodedPath}`;
               try {
-                const response = await context.request.get(url, { timeout: 5000 });
+                const response = await context.request.get(url, { timeout: 120000 });
                 if (response.ok()) {
                   const ct = response.headers()['content-type'] || '';
                   if (ct.includes('text/html') && !assetPath.endsWith('.html')) return false;
@@ -1178,6 +1394,67 @@ export class Crawler {
         console.log(`[Crawler] Second pass: downloaded ${extraDownloaded} extra assets`);
         downloaded += extraDownloaded;
       }
+    }
+
+    // Final step: rewrite external CDN URLs in cached JS/HTML files to local relative paths
+    // This ensures the cached site works offline without reaching out to CDN origins
+    this.rewriteExternalCdnUrls(cacheDir);
+  }
+
+  /** Rewrite external CDN URLs in cached JS/HTML files to local relative paths */
+  private rewriteExternalCdnUrls(cacheDir: string): void {
+    // Collect external origins from .meta.json files
+    const externalOrigins = new Set<string>();
+    const walkMeta = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walkMeta(full);
+        else if (entry.name.endsWith('.meta.json')) {
+          try {
+            const meta = JSON.parse(readFileSync(full, 'utf-8'));
+            if (meta.hostname && meta.hostname !== this.targetHostname) {
+              const parsed = new URL(meta.url);
+              externalOrigins.add(parsed.origin);
+            }
+          } catch {}
+        }
+      }
+    };
+    walkMeta(cacheDir);
+
+    if (externalOrigins.size === 0) return;
+    console.log(`[Crawler] Rewriting external CDN origins in cached files: ${[...externalOrigins].join(', ')}`);
+
+    // Walk all JS and HTML files and replace external origins with empty string
+    let rewritten = 0;
+    const walkRewrite = (dir: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walkRewrite(full);
+        else if (entry.name.endsWith('.js') || entry.name.endsWith('.html')) {
+          if (entry.name.endsWith('.meta.json')) continue;
+          try {
+            let content = readFileSync(full, 'utf-8');
+            let changed = false;
+            for (const origin of externalOrigins) {
+              if (content.includes(origin)) {
+                content = content.replaceAll(origin, '');
+                changed = true;
+              }
+            }
+            if (changed) {
+              writeFileSync(full, content);
+              rewritten++;
+            }
+          } catch {}
+        }
+      }
+    };
+    walkRewrite(cacheDir);
+    if (rewritten > 0) {
+      console.log(`[Crawler] Rewrote external CDN URLs in ${rewritten} files`);
     }
   }
 }

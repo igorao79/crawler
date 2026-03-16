@@ -365,8 +365,10 @@ export async function projectRoutes(fastify: FastifyInstance): Promise<void> {
         const fullPath = join(dir, entry.name);
         const zipPath = zipPrefix ? `${zipPrefix}/${entry.name}` : entry.name;
         if (entry.isDirectory()) {
-          // Skip npm package directories (e.g. zone.js/dist/)
-          if (/^\w[\w.-]*\.\w+$/.test(entry.name) && !entry.name.startsWith('_')) continue;
+          // Skip npm package directories (e.g. zone.js/dist/) but NOT domain names in _ipx paths
+          const looksLikeNpmPkg = /^\w[\w.-]*\.\w+$/.test(entry.name) && !entry.name.startsWith('_');
+          const isInsideIpx = zipPrefix.includes('_ipx');
+          if (looksLikeNpmPkg && !isInsideIpx) continue;
           // Skip junk directories from external CDNs (Vimeo playlist tokens, etc.)
           if (entry.name.startsWith('exp=') || entry.name.startsWith('hmac=') || entry.name.startsWith('psid=')) continue;
           await walkAndAdd(fullPath, zipPath);

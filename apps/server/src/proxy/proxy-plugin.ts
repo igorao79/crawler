@@ -1,9 +1,12 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs';
+import { join, dirname, resolve } from 'path';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
 
-const BASE_CACHE_DIR = './proxy-cache';
+// Use absolute path based on server package root so CWD doesn't matter
+const __dirname_resolved = dirname(fileURLToPath(import.meta.url));
+const BASE_CACHE_DIR = resolve(__dirname_resolved, '../../proxy-cache');
 
 // Dynamic target — set when a crawl starts, cleared when done
 let currentTarget: string | null = null;
@@ -12,6 +15,7 @@ let browserCookies: string | null = null;
 
 export function setProxyTarget(target: string | null): void {
   currentTarget = target;
+  externalOrigins = null; // Reset so it re-scans for new target
   console.log(`[Proxy] Target set to: ${target ?? '(none)'}`);
 }
 
@@ -45,6 +49,8 @@ function getCachePath(urlPath: string): string {
   if (safePath.endsWith('/') || safePath === '') safePath += 'index.html';
   const lastSegment = safePath.split('/').pop() || '';
   if (!lastSegment.includes('.')) safePath += '/index.html';
+  // Sanitize Windows-invalid characters in path segments (e.g. "https:" → "https%3A", "&" → "%26")
+  safePath = safePath.split('/').map(seg => seg.replace(/:/g, '%3A').replace(/&/g, '%26')).join('/');
   return join(cacheDir, safePath);
 }
 
@@ -70,13 +76,67 @@ interface CacheMeta {
   cachedAt: string;
 }
 
+// Cache of external CDN origins → loaded lazily from .meta.json files
+let externalOrigins: Set<string> | null = null;
+
+/** Scan .meta.json files to find external CDN origins that were cached locally */
+function getExternalOrigins(): Set<string> {
+  if (externalOrigins) return externalOrigins;
+  externalOrigins = new Set();
+  const cacheDir = getCacheDir();
+  if (!existsSync(cacheDir)) return externalOrigins;
+  // Walk cache dir and collect unique external hostnames from meta files
+  const walk = (dir: string) => {
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.meta.json')) {
+          try {
+            const meta = JSON.parse(readFileSync(full, 'utf-8'));
+            if (meta.hostname && meta.url) {
+              const targetHost = currentTarget ? new URL(currentTarget).hostname : '';
+              if (meta.hostname !== targetHost) {
+                // Extract origin from the full URL
+                const parsed = new URL(meta.url);
+                externalOrigins!.add(parsed.origin);
+              }
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  };
+  walk(cacheDir);
+  if (externalOrigins.size > 0) {
+    console.log(`[Proxy] External CDN origins for URL rewriting: ${[...externalOrigins].join(', ')}`);
+  }
+  return externalOrigins;
+}
+
+/** Rewrite external CDN URLs to local relative paths */
+function rewriteExternalUrls(content: string): string {
+  const origins = getExternalOrigins();
+  for (const origin of origins) {
+    // Replace "https://cdn.example.com/path" with "/path"
+    content = content.replaceAll(origin, '');
+  }
+  return content;
+}
+
 function rewriteHtml(html: string): string {
   html = html.replace(/<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
+  // Strip SRI integrity attributes — proxied content may differ from origin hashes
+  html = html.replace(/\s+integrity=["'][^"']*["']/gi, '');
+  // Also strip crossorigin attributes that pair with integrity
+  html = html.replace(/\s+crossorigin(?:=["'][^"']*["'])?/gi, '');
+  // Rewrite external CDN URLs to local paths
+  html = rewriteExternalUrls(html);
   return html;
 }
 
 function rewriteJs(js: string): string {
-  return js;
+  return rewriteExternalUrls(js);
 }
 
 /**
@@ -122,15 +182,46 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
   } else {
     cachePath = getCachePath(url);
   }
-  const metaPath = getMetaPath(cachePath);
 
-  if (existsSync(cachePath) && existsSync(metaPath)) {
-    const meta: CacheMeta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+  // If not found, try URL-encoded variant (handles _ipx paths with &, : etc. on Windows)
+  if (!existsSync(cachePath)) {
+    const encodedUrl = url.split('/').map(seg => {
+      try { return encodeURIComponent(decodeURIComponent(seg)); } catch { return seg; }
+    }).join('/');
+    const encodedPath = getCachePath(encodedUrl);
+    if (existsSync(encodedPath)) cachePath = encodedPath;
+    // Also try &amp; variant (legacy caches stored with HTML entity encoding)
+    if (!existsSync(cachePath)) {
+      const ampUrl = url.replace(/&/g, '&amp;');
+      const ampEncoded = ampUrl.split('/').map(seg => {
+        try { return encodeURIComponent(decodeURIComponent(seg)); } catch { return seg; }
+      }).join('/');
+      const ampPath = getCachePath(ampEncoded);
+      if (existsSync(ampPath)) cachePath = ampPath;
+    }
+  }
+
+  const metaPath = getMetaPath(cachePath);
+  const hasMeta = existsSync(metaPath);
+
+  if (existsSync(cachePath)) {
+    const meta: CacheMeta | null = hasMeta ? JSON.parse(readFileSync(metaPath, 'utf-8')) : null;
     const body = readFileSync(cachePath);
-    let contentType = meta.contentType || 'application/octet-stream';
+    // Determine content type from meta or file extension
+    const MIME_MAP: Record<string, string> = {
+      '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.json': 'application/json',
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml',
+      '.webp': 'image/webp', '.avif': 'image/avif', '.gif': 'image/gif', '.ico': 'image/x-icon',
+      '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf', '.otf': 'font/otf',
+      '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+      '.wasm': 'application/wasm', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json',
+      '.ktx': 'application/octet-stream', '.ktx2': 'application/octet-stream', '.bin': 'application/octet-stream',
+    };
+    const ext = cachePath.substring(cachePath.lastIndexOf('.')).toLowerCase();
+    let contentType = meta?.contentType || MIME_MAP[ext] || 'application/octet-stream';
     if (cachePath.endsWith('.html')) contentType = 'text/html; charset=utf-8';
 
-    reply.status(meta.status || 200);
+    reply.status(meta?.status || 200);
     reply.header('content-type', contentType);
     reply.header('x-proxy-cache', 'HIT');
     reply.removeHeader('content-security-policy');
@@ -171,7 +262,12 @@ export async function handleProxyRequest(request: FastifyRequest, reply: Fastify
     if (res.status < 400) {
       const cacheFileDir = dirname(cachePath);
       if (!existsSync(cacheFileDir)) mkdirSync(cacheFileDir, { recursive: true });
-      writeFileSync(cachePath, buffer);
+      // Strip SRI integrity from HTML before saving to disk (so ZIP/audit-server also work)
+      if (contentType.includes('text/html')) {
+        writeFileSync(cachePath, rewriteHtml(buffer.toString('utf-8')));
+      } else {
+        writeFileSync(cachePath, buffer);
+      }
     } else {
       console.warn(`[PROXY] Not caching ${fullUrl} (status ${res.status})`);
     }
